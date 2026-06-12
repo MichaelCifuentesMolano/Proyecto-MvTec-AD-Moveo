@@ -1,0 +1,193 @@
+# config/search.yaml
+# ==================
+# NSGA-II multi-objective neural architecture + quantization search.
+#
+# Objectives (all minimised internally — signs applied by the engine):
+#   -auroc         : Anomaly detection ROC-AUC  (maximise → negate)
+#    latency_ms    : Warm inference latency on target device
+#    peak_ram_mb   : Peak resident memory during inference
+#    energy_mj     : Energy per inference (mJ), estimated from power × latency
+#
+# Reference point for hypervolume indicator must be strictly dominated by
+# every feasible solution.  Tune after a pilot run if the front collapses.
+
+# ── Inheritance ───────────────────────────────────────────────────────────
+# Uncomment to inherit from a base and override only what differs:
+# base: config/search_base.yaml
+
+# ── Variable substitutions (resolved at load time via ${VAR}) ─────────────
+vars:
+  POP:  "40"        # Population size (referenced below for clarity)
+  NGEN: "50"        # Number of generations
+
+# ─────────────────────────────────────────────────────────────────────────
+# Algorithm
+# ─────────────────────────────────────────────────────────────────────────
+algorithm:
+  name: nsga2                   # nsga2 | nsga3 | random
+  seed: 42
+
+  # Population & budget.
+  population_size: 40           # Must be even for DEAP's tournament selection.
+  n_generations:   50           # Total evolutionary generations.
+  n_evaluations_max: 2000       # Hard cap independent of generations.
+
+  # Warm-start: path to a checkpoint population JSON to resume from.
+  # Set to null to start from scratch.
+  warm_start_checkpoint: null
+
+# ─────────────────────────────────────────────────────────────────────────
+# Genetic operators
+# ─────────────────────────────────────────────────────────────────────────
+operators:
+  # Simulated Binary Crossover (SBX).
+  crossover:
+    probability: 0.90           # Per-individual crossover probability.
+    eta: 15.0                   # Distribution index (higher → children near parents).
+
+  # Polynomial mutation.
+  mutation:
+    probability: 0.10           # Per-gene mutation probability (≈ 1/n_genes rule).
+    eta: 20.0                   # Distribution index (higher → small perturbations).
+
+  # Tournament selection pressure.
+  tournament_size: 2
+
+# ─────────────────────────────────────────────────────────────────────────
+# Objectives
+# ─────────────────────────────────────────────────────────────────────────
+objectives:
+  # Each entry: name, direction (min|max), weight for scalarisation display.
+  - name:      auroc
+    direction: max
+    weight:    1.0
+    unit:      "—"             # dimensionless [0, 1]
+
+  - name:      latency_ms
+    direction: min
+    weight:    1.0
+    unit:      ms
+    budget:    20.0            # Soft constraint: solutions > budget are penalised.
+
+  - name:      peak_ram_mb
+    direction: min
+    weight:    1.0
+    unit:      MB
+    budget:    512.0
+
+  - name:      energy_mj
+    direction: min
+    weight:    1.0
+    unit:      mJ
+    budget:    5.0
+
+# ─────────────────────────────────────────────────────────────────────────
+# Hypervolume indicator
+# ─────────────────────────────────────────────────────────────────────────
+hypervolume:
+  # Reference point: must be strictly dominated by every feasible solution.
+  # Order matches the objectives list above (all converted to minimisation).
+  reference_point: [0.0, 50.0, 1024.0, 20.0]
+  # -auroc:       0.0  → worst AUROC = 1.0  → negated = 0.0, so ref = 0.0
+  # latency_ms:   50   ms
+  # peak_ram_mb: 1024  MB
+  # energy_mj:    20   mJ
+
+  method: auto                  # auto | exact_2d | exact_3d | monte_carlo
+  mc_samples: 50000             # Used only when method=monte_carlo.
+  mc_seed: 0
+
+# ─────────────────────────────────────────────────────────────────────────
+# Search space — architecture genes
+# ─────────────────────────────────────────────────────────────────────────
+search_space:
+  backbone:
+    choices:
+      - resnet18
+      - resnet34
+      - efficientnet_b0
+      - efficientnet_b2
+      - mobilenet_v3_small
+      - mobilenet_v3_large
+
+  decoder:
+    choices:
+      - unet
+      - fpn
+      - simple_conv
+
+  # Intermediate feature channels (power-of-two values).
+  channels:
+    min: 32
+    max: 256
+    step: 32                    # Gene is an integer index → value = min + idx*step.
+
+  # Number of decoder / reconstruction layers.
+  n_layers:
+    min: 2
+    max: 6
+
+  # Anomaly scoring head.
+  score_head:
+    choices:
+      - cosine
+      - l2
+      - learned
+
+# ─────────────────────────────────────────────────────────────────────────
+# Search space — quantization genes
+# ─────────────────────────────────────────────────────────────────────────
+quantization:
+  enabled: true
+
+  bits_weights:
+    choices: [4, 8]             # INT4 or INT8 per-layer weight precision.
+
+  bits_activations:
+    choices: [8]                # INT8 activations (INT4 optional, set [4,8]).
+
+  per_channel: true             # Per-channel scale for weights (more accurate).
+  symmetric: true               # Symmetric quantization (required for INT4).
+
+  # QAT fine-tuning epochs applied after each candidate evaluation.
+  qat_epochs: 3
+  qat_lr: 1.0e-4
+
+# ─────────────────────────────────────────────────────────────────────────
+# Convergence detection
+# ─────────────────────────────────────────────────────────────────────────
+convergence:
+  enabled: true
+
+  # Hypervolume plateau.
+  hv_plateau_window:  10        # Sliding window of generations.
+  hv_plateau_rel_tol: 1.0e-3   # Relative improvement below this → plateau.
+
+  # Pareto-front stability (Jaccard similarity).
+  pareto_stability_window:    5
+  pareto_stability_threshold: 0.90
+
+  # Diversity collapse (spacing metric).
+  diversity_collapse_threshold: 0.01
+
+  # Minimum generations before early stopping is considered.
+  min_generations: 20
+
+# ─────────────────────────────────────────────────────────────────────────
+# Parallelism
+# ─────────────────────────────────────────────────────────────────────────
+parallelism:
+  # Number of candidates evaluated in parallel (set to 1 on Jetson Nano).
+  n_workers: 1
+
+  # Evaluation timeout per candidate (seconds).
+  eval_timeout_s: 300
+
+# ─────────────────────────────────────────────────────────────────────────
+# Output
+# ─────────────────────────────────────────────────────────────────────────
+output:
+  checkpoint_every_n_generations: 5
+  save_all_individuals: false   # True → keep every evaluated candidate.
+  pareto_plot: true
+  convergence_plot: true

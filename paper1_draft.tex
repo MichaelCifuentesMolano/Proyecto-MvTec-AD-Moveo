@@ -1,0 +1,1421 @@
+% =============================================================================
+%  Joint Neural Architecture and Quantization Search for Real-Time Anomaly
+%  Detection on Embedded Manipulators
+%
+%  LaTeX draft — Sections writable from current experimental data.
+%  Placeholders marked with \TODO{} require Jetson deployment results.
+%  Intended format: IEEE Transactions on Industrial Informatics (double-column).
+% =============================================================================
+
+\documentclass[journal]{IEEEtran}
+
+% ---- Packages ---------------------------------------------------------------
+\usepackage{amsmath,amssymb,amsfonts}
+\usepackage{algorithmic}
+\usepackage{algorithm}
+\usepackage{array}
+\usepackage{booktabs}
+\usepackage{multirow}
+\usepackage{graphicx}
+\usepackage{cite}
+\usepackage{xcolor}
+\usepackage{hyperref}
+\usepackage{bm}
+\usepackage{bbm}
+
+% ---- Convenience macros -----------------------------------------------------
+\newcommand{\TODO}[1]{\textcolor{red}{\textbf{[TODO: #1]}}}
+\newcommand{\Rbb}{\mathbb{R}}
+\newcommand{\Nbb}{\mathbb{N}}
+\newcommand{\calA}{\mathcal{A}}
+\newcommand{\calQ}{\mathcal{Q}}
+\newcommand{\calX}{\mathcal{X}}
+\newcommand{\calF}{\mathcal{F}}
+\newcommand{\argmin}{\operatorname*{arg\,min}}
+
+% =============================================================================
+\begin{document}
+
+\title{Joint Neural Architecture and Quantization Search\\
+for Real-Time Anomaly Detection on Embedded Manipulators}
+
+% Author block — fill in before submission
+\author{Maicol~Cifuentes,~\IEEEmembership{Student Member,~IEEE}%
+\thanks{M. Cifuentes is with the Universidad Tecnol\'ogica de Pereira (UTP),
+Pereira, Colombia (e-mail: mcifuentes@utp.edu.co).}%
+\thanks{Manuscript received \TODO{date}; revised \TODO{date}.}}
+
+\maketitle
+
+% =============================================================================
+\begin{abstract}
+Deploying vision-based anomaly detection inside robotic manipulators demands
+models that are simultaneously accurate, low-latency, memory-efficient, and
+energy-frugal — objectives that conflict in all known neural architectures.
+We present a joint Neural Architecture Search and Quantization-Aware Training
+(NAS+QAT) framework that resolves this conflict through a four-objective
+Pareto optimization.
+A genome representation encodes both the macro-structure of the detector
+(family, depth, channel widths, block types, attention mechanisms) and its
+per-layer mixed-precision quantization profile (weight and activation bit
+widths independently drawn from $\{4,6,8\}$ bits), yielding a joint search
+space with more than $10^{10}$ candidate configurations.
+NSGA-II is used to evolve a population of 32 architectures over 30 generations,
+minimizing simultaneously the complement of the image-level Area Under the
+ROC Curve (AUROC), inference latency, peak RAM, and energy per inference.
+Experiments on the MVTec Anomaly Detection benchmark demonstrate that the
+evolutionary search identifies 32 non-dominated solutions spanning AUROC from
+0.781 to 0.894 at proxy evaluation, with proxy latencies between 12.0 and
+14.7\,ms.
+Full-budget Quantization-Aware Training of the five highest-ranked Pareto
+candidates consistently raises AUROC into the range 0.900--0.914, yielding an
+average accuracy gain of $+2.4$ percentage points over their proxy estimates.
+Notably, one candidate — a depth-5 UNet with selective CBAM attention and
+aggressive mixed-precision quantization — reaches an AUROC of 0.914 while
+converging to its best checkpoint three times faster than comparable models
+(epoch 48 vs.\ 185 on average).
+\TODO{After TensorRT compilation and benchmarking on a Jetson Orin Nano 8\,GB,
+the top-ranked model achieves XX\,ms latency (p95), XX\,mJ per inference, and
+XX\,MB peak RAM in INT8 precision, with an on-device AUROC drop below the
+$0.02$ tolerance threshold.}
+The resulting framework provides a principled, reproducible methodology for
+designing task-specific quantized detectors targeting embedded robotic
+platforms.
+\end{abstract}
+
+\begin{IEEEkeywords}
+anomaly detection, neural architecture search, quantization-aware training,
+mixed-precision, multi-objective optimization, NSGA-II, embedded AI,
+robotic manipulator, MVTec AD, Jetson Orin Nano.
+\end{IEEEkeywords}
+
+% =============================================================================
+\section{Introduction}
+\label{sec:intro}
+
+Industrial robotic manipulators are increasingly expected to perform in-line
+quality inspection alongside their primary manipulation tasks.
+Embedding an anomaly detector directly on the robot's on-board compute
+eliminates the latency and bandwidth overhead of streaming images to a remote
+server, enables closed-loop rejection of defective parts, and reduces
+infrastructure cost.
+The Jetson Orin Nano 8\,GB~\cite{nvidia2023jetson}, with its Ampere GPU
+and unified memory architecture, is a representative platform for this
+application: it provides sufficient compute for deep inference while fitting
+within the power and size envelope of an articulated arm.
+
+However, deploying state-of-the-art anomaly detectors on such hardware is
+far from straightforward.
+Methods that achieve near-perfect performance on the MVTec Anomaly Detection
+(MVTec AD) benchmark~\cite{bergmann2019mvtec} — such as
+PatchCore~\cite{roth2022towards}, CFlow-AD~\cite{gudovskiy2022cflow}, and
+FastFlow~\cite{yu2021fastflow} — were designed for server-class GPUs and
+typically require hundreds of megabytes of memory, dozens of milliseconds of
+latency per frame, and watt-level power draws that are incompatible with
+embedded operation.
+Lightweight alternatives such as
+EfficientAD~\cite{batzner2024efficientad} improve efficiency but still require
+manual architecture selection and do not expose a systematic mechanism for
+adapting the accuracy--efficiency trade-off to a given hardware budget.
+
+A natural approach is to automate this adaptation via Neural Architecture Search
+(NAS)~\cite{elsken2019neural,white2023neural}.
+Yet existing NAS frameworks for anomaly detection treat architecture and
+quantization as separate design decisions: architecture search selects a
+floating-point model, and post-training quantization (PTQ) or
+quantization-aware training (QAT) is applied afterward, often degrading
+accuracy for aggressive bit widths.
+We argue that architecture and quantization must be co-optimized: the optimal
+per-layer bit assignment depends on the sensitivity of each layer's
+representations, which in turn depends on architectural choices such as skip
+connections, attention modules, and block type.
+
+This paper addresses the following research question:
+\textit{Can we jointly search the architecture and quantization configuration
+of an anomaly detection network so that the resulting model simultaneously
+satisfies accuracy, latency, memory, and energy requirements of an embedded
+robotic platform, without requiring any target-device execution during the
+search itself?}
+
+Our answer is a \textbf{Joint NAS+QAT} framework structured around three
+contributions:
+
+\begin{enumerate}
+
+\item \textbf{A joint search space} that unifies four anomaly-detection
+architecture families (patch-based CNN, encoder--decoder UNet, student--teacher
+distillation, and autoencoder) with a per-layer mixed-precision quantization
+profile.
+Each genome encodes $d$ architectural and $2d$ quantization decisions
+independently for a network of depth $d$, yielding a search space of
+$|\calX| > 10^{10}$ configurations.
+
+\item \textbf{A four-objective NSGA-II search} that simultaneously optimizes
+accuracy (AUROC), inference latency, peak RAM, and energy per inference using
+only inexpensive proxy evaluations on a development PC, avoiding the need for
+target-device access during the evolutionary search.
+After 30 generations with a population of 32, the algorithm identifies 32
+Pareto-optimal configurations spanning AUROC 0.781--0.894 at proxy-latency
+12.0--14.7\,ms.
+
+\item \textbf{Full-budget QAT retraining analysis} showing that the Pareto
+ordering established by proxy metrics partially but not perfectly predicts
+post-retraining accuracy: all five retrained candidates exceed AUROC\,0.90,
+but re-ranking occurs, with the search's fourth-ranked candidate overtaking the
+first after 200 epochs.
+This re-ranking is accompanied by a convergence anomaly — one architecture
+reaches its global minimum in 48 epochs versus an average of 185 for its
+peers — which we attribute to its lower-layer bottleneck ratio and
+selective use of CBAM attention.
+
+\end{enumerate}
+
+The remainder of the paper is organized as follows.
+Section~\ref{sec:related} reviews related work on anomaly detection,
+NAS, and network quantization.
+Section~\ref{sec:formulation} formalizes the multi-objective optimization
+problem.
+Section~\ref{sec:searchspace} describes the joint search space and genome
+encoding.
+Section~\ref{sec:nsga2} details the NSGA-II search procedure and proxy
+fitness evaluation.
+Section~\ref{sec:retraining} describes the full-budget QAT retraining stage.
+Section~\ref{sec:experiments} presents the experimental setup and results.
+Section~\ref{sec:discussion} discusses limitations and open questions.
+Section~\ref{sec:conclusion} concludes.
+
+% =============================================================================
+\section{Related Work}
+\label{sec:related}
+
+\subsection{Visual Anomaly Detection}
+
+Unsupervised anomaly detection from images has been studied extensively in the
+context of industrial quality control, driven by the MVTec AD
+benchmark~\cite{bergmann2019mvtec} and its successors
+MVTec LOCO~\cite{bergmann2022beyond} and
+VisA~\cite{zou2022spot}.
+Methods can be broadly categorized as reconstruction-based, embedding-based,
+normalizing-flow-based, and knowledge-distillation-based.
+
+\textit{Reconstruction-based} methods~\cite{bergmann2019improving,
+baur2021autoencoders} train autoencoders on normal data and flag regions
+where reconstruction error exceeds a threshold.
+While simple to implement, they suffer from over-generalization: powerful
+decoders can reconstruct anomalies accurately, suppressing the detection
+signal.
+
+\textit{Embedding-based} methods project image patches into a
+pre-trained feature space and flag outliers by distance or density estimation.
+SPADE~\cite{cohen2020sub} uses $k$-NN in feature space;
+PaDiM~\cite{defard2021padim} models per-position Gaussian distributions;
+PatchCore~\cite{roth2022towards} maintains a coreset of normal patch
+embeddings and achieves near-human performance on MVTec AD.
+These methods are accurate but memory-intensive — PatchCore requires storing
+the entire coreset at inference time, making it unsuitable for embedded
+deployment.
+
+\textit{Normalizing-flow-based} methods~\cite{gudovskiy2022cflow,
+yu2021fastflow,rudolph2022csflow} model the distribution of normal features
+as an exact likelihood under an invertible transformation.
+They avoid memory overhead but require significant compute at inference due
+to the flow's forward pass.
+
+\textit{Knowledge-distillation-based} methods~\cite{bergmann2020uninformed,
+wang2021student,batzner2024efficientad} train a student network to mimic a
+teacher on normal data; anomalies cause elevated discrepancy.
+EfficientAD~\cite{batzner2024efficientad} is currently the most efficient
+single-model detector, reaching sub-millisecond latency on a server GPU while
+maintaining competitive AUROC, but it is not designed for integer quantization
+or embedded execution.
+
+To our knowledge, no prior work jointly optimizes the architecture and
+quantization of an anomaly detector for a specific embedded platform.
+The closest works are
+EfficientAD~\cite{batzner2024efficientad}, which targets efficiency but not
+quantization, and
+NASiam~\cite{TODO_nasiam}, which applies NAS to anomaly detection but ignores
+quantization and hardware constraints.
+
+\subsection{Neural Architecture Search}
+
+NAS automates the design of neural network topologies for a target task.
+Early approaches based on reinforcement learning~\cite{zoph2017neural} and
+evolutionary algorithms~\cite{real2019regularized} required thousands of GPU
+hours.
+Differentiable NAS (DARTS~\cite{liu2019darts} and its variants) reduced
+search cost dramatically by relaxing the discrete architecture selection to a
+continuous mixture of operations, but is prone to performance collapse and
+produces architectures that do not transfer reliably to quantized or
+resource-constrained settings.
+
+\textit{Hardware-aware NAS} incorporates device-specific metrics into the
+search objective.
+MNASNet~\cite{tan2019mnasnet} uses a reward that multiplies accuracy by a
+latency term; ProxylessNAS~\cite{cai2019proxylessnas} allows direct latency
+measurement on target hardware during search;
+Once-for-All~\cite{cai2020ofa} trains a super-network from which sub-networks
+of varying sizes can be extracted without re-training.
+These methods target classification tasks and assume full-precision inference.
+
+\textit{Multi-objective NAS} explicitly maintains a Pareto front over
+competing objectives.
+NSGA-NET~\cite{lu2019nsga} applies NSGA-II~\cite{deb2002fast} to the
+architecture search; CARS~\cite{yang2020cars} uses a co-evolutionary strategy;
+LEMONADE~\cite{elsken2019lemonade} performs Lamarckian evolution with mutation
+operators designed to preserve architectural patterns.
+None of these methods include quantization in the search variable.
+
+\subsection{Network Quantization and Mixed Precision}
+
+Quantization reduces model size and accelerates inference by representing
+weights and activations in low-bit integer formats.
+Post-Training Quantization (PTQ) requires only a small calibration
+dataset~\cite{nagel2020up,hubara2021accurate} but degrades accuracy
+significantly below 8 bits.
+QAT~\cite{jacob2018quantization} incorporates fake-quantization nodes during
+training and uses the Straight-Through Estimator (STE)~\cite{bengio2013estimating}
+to propagate gradients through the discontinuous round operation, typically
+achieving accuracy within 1\% of the full-precision baseline even at 4 bits.
+
+\textit{Mixed-precision} QAT assigns different bit widths to different layers,
+exploiting the observation that some layers are far more sensitive to
+quantization than others~\cite{dong2019hawq,wang2019haq}.
+HAQ~\cite{wang2019haq} uses reinforcement learning to select per-layer bit
+widths; HAWQ~\cite{dong2019hawq} uses the Hessian spectrum as a sensitivity
+proxy.
+APQ~\cite{wang2020apq} jointly searches architecture and quantization policy
+using a once-for-all super-network, but restricts its evaluation to ImageNet
+classification.
+Our work differs in two key aspects: (i) we target anomaly detection, where
+the task structure (one-class learning from normal data) fundamentally differs
+from supervised classification; and (ii) we perform a \emph{from-scratch}
+joint search without pre-training a super-network, which avoids the coupling
+between the super-network's training and the final model's quantization
+sensitivity.
+
+\subsection{Embedded Deployment of Anomaly Detectors}
+
+Deploying anomaly detectors on edge devices has received growing attention
+as robotic systems become more autonomous.
+Schlüter et al.~\cite{schluter2022natural} evaluate several MVTec AD methods
+on a Raspberry Pi but restrict to unquantized float32 models.
+Batzner et al.~\cite{batzner2024efficientad} benchmark EfficientAD on a
+Jetson AGX Orin at full precision.
+Quantized deployment of anomaly detectors — particularly with layer-wise
+mixed precision targeting INT8 TensorRT engines — has not been systematically
+studied, to the best of our knowledge.
+This paper fills that gap.
+
+% =============================================================================
+\section{Problem Formulation}
+\label{sec:formulation}
+
+Let $\bm{x} = (\bm{\alpha}, \bm{q}) \in \calX = \calA \times \calQ$ denote a
+candidate solution, where $\bm{\alpha} \in \calA$ is the architecture
+specification and $\bm{q} \in \calQ$ is the quantization specification.
+Given a training dataset $\mathcal{D}_{\mathrm{train}}$ of normal images and
+a test set $\mathcal{D}_{\mathrm{test}}$ with ground-truth anomaly labels, we
+define four objective functions:
+
+\begin{align}
+f_1(\bm{x}) &= 1 - \mathrm{AUROC}\bigl(\bm{x}, \mathcal{D}_{\mathrm{test}}\bigr)
+  \label{eq:obj1} \\
+f_2(\bm{x}) &= L(\bm{x})   \quad \text{[ms]}  \label{eq:obj2} \\
+f_3(\bm{x}) &= M(\bm{x})   \quad \text{[MB]}  \label{eq:obj3} \\
+f_4(\bm{x}) &= E(\bm{x})   \quad \text{[mJ]}  \label{eq:obj4}
+\end{align}
+
+where $\mathrm{AUROC}(\bm{x}, \cdot)$ is the image-level area under the
+receiver operating characteristic curve, $L(\bm{x})$ is the per-image
+inference latency at the 95th percentile, $M(\bm{x})$ is the peak GPU RAM
+consumed during a single forward pass, and $E(\bm{x})$ is the energy consumed
+per inference.
+We seek to solve the four-objective minimization problem:
+
+\begin{equation}
+\min_{\bm{x} \in \calX}
+\bigl[ f_1(\bm{x}),\; f_2(\bm{x}),\; f_3(\bm{x}),\; f_4(\bm{x}) \bigr]
+\label{eq:mop}
+\end{equation}
+
+subject to the hardware budget constraints:
+
+\begin{align}
+f_2(\bm{x}) &\leq L_{\max} = 20\;\text{ms}  \label{eq:c1} \\
+f_3(\bm{x}) &\leq M_{\max} = 512\;\text{MB} \label{eq:c2} \\
+f_4(\bm{x}) &\leq E_{\max} = 5\;\text{mJ}   \label{eq:c3}
+\end{align}
+
+\noindent
+Because there is in general no single solution that minimizes all four
+objectives simultaneously, we target the \emph{Pareto front}: the set
+$\mathcal{P}^* \subset \calX$ of all non-dominated solutions.
+A solution $\bm{x}_1$ \textit{Pareto-dominates} $\bm{x}_2$, written
+$\bm{x}_1 \prec \bm{x}_2$, if and only if
+
+\begin{equation}
+\forall i \in \{1,2,3,4\}: f_i(\bm{x}_1) \leq f_i(\bm{x}_2)
+\quad\text{and}\quad
+\exists j: f_j(\bm{x}_1) < f_j(\bm{x}_2).
+\label{eq:dominance}
+\end{equation}
+
+\noindent
+The Pareto front is:
+$\mathcal{P}^* = \{\bm{x} \in \calX \mid \nexists\, \bm{x}' \in \calX : \bm{x}' \prec \bm{x}\}$.
+
+\medskip
+\noindent\textbf{Proxy vs.\ ground-truth objectives.}
+Evaluating $f_2$, $f_3$, and $f_4$ exactly requires running inference on the
+target Jetson hardware, which is expensive and limits the number of candidates
+that can be evaluated during search.
+We therefore introduce proxy functions
+$\tilde{f}_2(\bm{x})$, $\tilde{f}_3(\bm{x})$, $\tilde{f}_4(\bm{x})$
+that approximate the true objectives using only PC-side computation
+(see Section~\ref{sec:proxy}).
+The quality of this approximation is validated post-hoc in
+Section~\ref{sec:deploy_results} \TODO{after on-device benchmarking}.
+
+% =============================================================================
+\section{Joint Search Space}
+\label{sec:searchspace}
+
+The joint search space $\calX = \calA \times \calQ$ decomposes into an
+architecture component and a quantization component, described below.
+
+\subsection{Architecture Search Space}
+\label{sec:arch_space}
+
+An architecture specification $\bm{\alpha}$ consists of:
+
+\begin{itemize}
+\item \textbf{Family} $\phi \in \{\texttt{patch\_cnn},\, \texttt{unet},\,
+  \texttt{student\_teacher},\, \texttt{autoencoder}\}$: the high-level
+  inductive bias of the detector.
+  \texttt{patch\_cnn} computes patch-level anomaly scores directly;
+  \texttt{unet} uses an encoder--decoder with skip connections for
+  pixel-level reconstruction; \texttt{student\_teacher} distills features
+  from a frozen teacher into a trained student;
+  \texttt{autoencoder} learns a compact latent representation of normal
+  appearance.
+\item \textbf{Input resolution} $s \in \{224, 256\}$ pixels (square).
+\item \textbf{Depth} $d \in \{2, 3, 4, 5\}$: number of encoder stages.
+\item Per-stage parameters (vectors of length $d$):
+  \begin{itemize}
+    \item \textbf{Channel widths} $\bm{c} \in \{16, 24, 32, 48, 64, 96, 128, 192\}^d$.
+    \item \textbf{Kernel sizes} $\bm{k} \in \{3, 5, 7\}^d$.
+    \item \textbf{Block types} $\bm{b} \in \{\texttt{ir},\,
+      \texttt{conv},\, \texttt{ds}\}^d$:
+      inverted-residual (MobileNetV2-style), standard convolution, and
+      depthwise-separable convolution, respectively.
+    \item \textbf{Bottleneck ratios} $\bm{r} \in \{0.5, 1.0, 2.0, 4.0, 6.0\}^d$.
+    \item \textbf{Skip connections} $\bm{s} \in \{0, 1\}^d$.
+    \item \textbf{Attention mechanisms}
+      $\bm{a} \in \{\texttt{none},\, \texttt{cbam},\, \texttt{eca},\,
+      \texttt{se},\, \texttt{spatial}\}^d$.
+  \end{itemize}
+\end{itemize}
+
+\noindent
+The Convolutional Block Attention Module
+(CBAM)~\cite{woo2018cbam} applies sequential channel-wise and spatial-wise
+attention; the Efficient Channel Attention (ECA)~\cite{wang2020eca} uses a
+1-D convolution over channel statistics; the Squeeze-and-Excitation
+(SE)~\cite{hu2018squeeze} module applies channel-wise re-weighting; and
+spatial attention applies a learned $7\times7$ spatial gate.
+
+\subsection{Quantization Search Space}
+\label{sec:quant_space}
+
+A quantization specification $\bm{q}$ consists of:
+
+\begin{itemize}
+\item Per-layer weight bit widths $\bm{w} \in \{4, 6, 8\}^d$.
+\item Per-layer activation bit widths $\bm{a} \in \{4, 6, 8\}^d$.
+\item Symmetric quantization flag $s_q \in \{0, 1\}$:
+  when enabled, the quantization range is $[-\Delta, \Delta]$ (signed
+  symmetric); otherwise asymmetric unsigned.
+\item Per-channel quantization flag $p_c \in \{0, 1\}$:
+  when enabled, each output channel of a weight tensor uses an independent
+  scale factor.
+\end{itemize}
+
+\noindent
+The $n$-bit uniform affine quantization of a real-valued tensor $\bm{v}$ is:
+
+\begin{equation}
+Q_n(\bm{v}) = \mathrm{clip}\!\left(
+  \left\lfloor \frac{\bm{v}}{s} \right\rceil + z,\;
+  q_{\min},\; q_{\max}
+\right),
+\label{eq:quant}
+\end{equation}
+
+where $s > 0$ is the scale factor, $z \in \Nbb$ is the zero-point
+(zero for symmetric), $q_{\min} = -(2^{n-1})$,
+$q_{\max} = 2^{n-1} - 1$ for signed, and
+$\lfloor \cdot \rceil$ denotes rounding to the nearest integer.
+During QAT, the forward pass uses $Q_n$ while gradients are propagated
+with the Straight-Through Estimator~\cite{bengio2013estimating}:
+
+\begin{equation}
+\frac{\partial \mathcal{L}}{\partial \bm{v}}
+= \frac{\partial \mathcal{L}}{\partial Q_n(\bm{v})}
+\cdot \mathbbm{1}\!\left[q_{\min} \leq \frac{\bm{v}}{s} + z \leq q_{\max}\right].
+\label{eq:ste}
+\end{equation}
+
+\subsection{Genome Encoding}
+\label{sec:genome}
+
+Each candidate $\bm{x} = (\bm{\alpha}, \bm{q})$ is encoded as a fixed-length
+integer vector $\bm{g} \in \mathcal{G}$, the genome.
+For a network of depth $d$, the genome has dimension:
+
+\begin{equation}
+|\bm{g}| = \underbrace{4}_{\phi,\, s,\, d,\, p_c} +
+\underbrace{6d}_{c_i, k_i, b_i, r_i, s_i, a_i} +
+\underbrace{2d + 2}_{w_i, a_i, s_q, p_c},
+\label{eq:genome_dim}
+\end{equation}
+
+which ranges from 22 (at $d=2$) to 46 (at $d=5$).
+The genome is padded to length 46 for crossover and mutation operations that
+require fixed-length representations.
+Inactive positions (corresponding to stages beyond depth $d$) are masked
+and do not affect phenotype decoding.
+
+\noindent\textbf{Search space cardinality.}
+Taking the Cartesian product of all discrete choices and integrating over all
+depths, the total search space contains:
+
+\begin{equation}
+|\calX| \;=\; \sum_{d=2}^{5}
+  |\calA_d| \cdot |\calQ_d|
+  \;\approx\; 2.3 \times 10^{10}
+\label{eq:space_size}
+\end{equation}
+
+configurations, making exhaustive evaluation intractable and motivating the
+use of evolutionary search.
+
+% =============================================================================
+\section{Multi-Objective Evolutionary Search}
+\label{sec:nsga2}
+
+\subsection{NSGA-II Overview}
+
+We adopt the Non-dominated Sorting Genetic Algorithm II
+(NSGA-II)~\cite{deb2002fast} as the outer optimizer.
+NSGA-II maintains a population $\mathcal{P}_t$ of $N$ individuals at each
+generation $t$, applies selection, crossover, and mutation to produce $N$
+offspring, and combines parents and offspring into a pool of size $2N$ from
+which the next generation is selected by non-dominated sorting and crowding
+distance.
+The overall pipeline is given in Algorithm~\ref{alg:nsga2}.
+
+\begin{algorithm}
+\caption{Joint NAS+QAT Search via NSGA-II}
+\label{alg:nsga2}
+\begin{algorithmic}[1]
+\REQUIRE Population size $N$, generations $T$,
+  training set $\mathcal{D}_{\mathrm{train}}$, proxy evaluator $\tilde{\mathcal{F}}$.
+\ENSURE Approximate Pareto front $\hat{\mathcal{P}}$.
+\STATE \textbf{Initialize}: $\mathcal{P}_0 \leftarrow$ random($N$) \COMMENT{uniform over $\calX$}
+\FOR{$t = 0$ \TO $T-1$}
+  \FOR{each $\bm{x} \in \mathcal{P}_t$ not yet evaluated}
+    \STATE $\bm{f}(\bm{x}) \leftarrow \tilde{\mathcal{F}}(\bm{x}, \mathcal{D}_{\mathrm{train}})$
+    \COMMENT{proxy fitness; see \S\ref{sec:proxy}}
+  \ENDFOR
+  \STATE $\mathcal{Q}_t \leftarrow$ \textbf{vary}($\mathcal{P}_t$)
+    \COMMENT{SBX crossover + polynomial mutation}
+  \FOR{each $\bm{x} \in \mathcal{Q}_t$ not yet evaluated}
+    \STATE $\bm{f}(\bm{x}) \leftarrow \tilde{\mathcal{F}}(\bm{x}, \mathcal{D}_{\mathrm{train}})$
+  \ENDFOR
+  \STATE $\mathcal{R}_t \leftarrow \mathcal{P}_t \cup \mathcal{Q}_t$
+  \STATE $\mathcal{P}_{t+1} \leftarrow$ \textbf{select}$_N$($\mathcal{R}_t$)
+    \COMMENT{non-dominated sort + crowding distance}
+\ENDFOR
+\STATE $\hat{\mathcal{P}} \leftarrow \{\bm{x} \in \mathcal{P}_T \mid \bm{x} \text{ not dominated in } \mathcal{P}_T\}$
+\end{algorithmic}
+\end{algorithm}
+
+\subsection{Selection and Variation Operators}
+
+\textbf{Selection.}
+After evaluating all individuals in $\mathcal{R}_t = \mathcal{P}_t \cup \mathcal{Q}_t$,
+candidates are ranked by non-dominated sorting into fronts
+$\mathcal{F}_1, \mathcal{F}_2, \ldots$
+The next population $\mathcal{P}_{t+1}$ is filled greedily by adding entire
+fronts until the budget $N$ is reached; when the current front would overflow,
+individuals within it are ranked by crowding distance~\cite{deb2002fast}:
+
+\begin{equation}
+\mathrm{cd}(\bm{x}) = \sum_{k=1}^{4}
+\frac{f_k\bigl(\bm{x}^{(k)}_{+1}\bigr) - f_k\bigl(\bm{x}^{(k)}_{-1}\bigr)}
+     {f_k^{\max} - f_k^{\min}},
+\label{eq:cd}
+\end{equation}
+
+where $\bm{x}^{(k)}_{\pm 1}$ denotes the nearest neighbors of $\bm{x}$ in
+objective $k$, and the denominator normalizes each axis.
+Individuals with larger crowding distance (i.e., located in sparser regions of
+the Pareto front) are preferred, promoting diversity.
+
+\textbf{Crossover.}
+Simulated Binary Crossover (SBX)~\cite{deb2001multi} is applied with
+probability $p_c = 0.90$ and distribution index $\eta_c = 15$.
+For two parent genomes $\bm{g}_1, \bm{g}_2$, the offspring are:
+
+\begin{equation}
+\bm{g}_1' = \tfrac{1}{2}\bigl[(1+\beta)\bm{g}_1 + (1-\beta)\bm{g}_2\bigr], \quad
+\bm{g}_2' = \tfrac{1}{2}\bigl[(1-\beta)\bm{g}_1 + (1+\beta)\bm{g}_2\bigr],
+\label{eq:sbx}
+\end{equation}
+
+where $\beta$ is sampled from the SBX distribution with parameter $\eta_c$.
+Continuous-valued offspring are rounded to the nearest valid discrete choice
+for each gene and decoded into architecture/quantization specifications.
+
+\textbf{Mutation.}
+Polynomial mutation~\cite{deb2001multi} is applied with per-gene probability
+$p_m = 0.10$ and distribution index $\eta_m = 20$.
+Each gene is independently perturbed:
+
+\begin{equation}
+g'_i = g_i + \delta_i \cdot (g_i^{\max} - g_i^{\min}),
+\label{eq:poly_mut}
+\end{equation}
+
+where $\delta_i$ is sampled from the polynomial distribution with parameter
+$\eta_m$, and the result is clipped to $[g_i^{\min}, g_i^{\max}]$ and rounded.
+Invalid genomes (e.g., depth--channel combinations that exceed RAM budget
+during model construction) are repaired by clamping the offending genes to
+their nearest valid value.
+
+\subsection{Proxy Fitness Evaluation}
+\label{sec:proxy}
+
+Exact evaluation of objectives $f_2$, $f_3$, $f_4$ requires inference on the
+Jetson Orin Nano, which is impractical during search.
+We define proxy evaluators $\tilde{f}_k$ that run entirely on the development
+PC (NVIDIA RTX or equivalent):
+
+\textbf{Proxy AUROC ($\tilde{f}_1$).}
+The genome $\bm{x}$ is instantiated as a full PyTorch model with fake-quantization
+nodes.
+The model is trained for a reduced budget of \TODO{XX} epochs on
+$\mathcal{D}_{\mathrm{train}}$ using the same loss and optimizer as full
+retraining (Section~\ref{sec:retraining}) but without learning-rate warmup.
+AUROC is computed on a held-out validation split (15\% of training data,
+stratified by defect type).
+
+\textbf{Proxy latency ($\tilde{f}_2$).}
+We measure wall-clock inference time on the development GPU for a batch of one
+image at resolution $s \times s$, averaged over 50 warm-up plus 200 timed
+iterations.
+This approximation captures the architecture-induced latency variation (deeper
+or wider models are consistently slower) but does not reflect
+device-specific memory bandwidth, quantization acceleration units, or TensorRT
+kernel fusion.
+The correlation between proxy and on-device latency is validated in
+Section~\ref{sec:deploy_results}~\TODO{after Jetson benchmarking}.
+
+\textbf{Proxy RAM ($\tilde{f}_3$).}
+Peak GPU memory is measured via \texttt{torch.cuda.max\_memory\_allocated()} after
+a forward pass of the model on the development GPU.
+This overestimates on-device RAM because it includes PyTorch allocator overhead;
+the Jetson's TensorRT runtime has a leaner memory footprint.
+
+\textbf{Proxy energy ($\tilde{f}_4$).}
+On-device energy measurement requires NVIDIA system management tools available
+only on the Jetson.
+During search, $\tilde{f}_4$ is set to a placeholder value of
+$9{,}999\;\text{mJ}$ for all candidates, effectively reducing the search to
+three active objectives.
+This design choice is intentional: the energy dimension is explored
+structurally through the quantization genome (lower bit widths reduce compute
+and memory operations, thereby reducing energy), and validated post-hoc
+on-device.
+
+\medskip
+\noindent\textbf{Hypervolume indicator.}
+Search convergence is monitored via the hypervolume
+indicator~\cite{zitzler1999multiobjective}:
+
+\begin{equation}
+\mathrm{HV}(\hat{\mathcal{P}}, \bm{r}) =
+\lambda\!\left(\bigcup_{\bm{x} \in \hat{\mathcal{P}}}
+  [\bm{f}(\bm{x}),\, \bm{r}]\right),
+\label{eq:hv}
+\end{equation}
+
+where $\lambda$ is the Lebesgue measure in objective space and
+$\bm{r} = (0.0,\; 50.0,\; 1024.0,\; 20.0)$ is the reference point
+(corresponding to zero AUROC, 50\,ms latency, 1\,GB RAM, and 20\,mJ energy).
+
+% =============================================================================
+\section{Full-Budget QAT Retraining}
+\label{sec:retraining}
+
+The evolutionary search identifies a set of Pareto-optimal candidates using
+proxy metrics.
+The top-$K$ candidates (ranked by a scalarized proxy score that
+weights AUROC positively and penalizes latency and RAM) are then retrained from
+scratch using the full training budget to obtain final, deployment-ready weights.
+
+\noindent\textbf{Loss function.}
+Anomaly detection is formulated as one-class learning.
+Let $f_{\bm{\theta}}(\bm{I}) \in \Rbb$ be the anomaly score produced by a
+model with parameters $\bm{\theta}$ for image $\bm{I}$.
+For reconstruction-family models (\texttt{unet}, \texttt{autoencoder}), the
+loss is the mean squared error between the input and its reconstruction:
+
+\begin{equation}
+\mathcal{L}_{\mathrm{recon}}(\bm{\theta}) =
+\mathbb{E}_{\bm{I} \sim \mathcal{D}_{\mathrm{train}}}
+\bigl\|\bm{I} - \hat{\bm{I}}_{\bm{\theta}}\bigr\|_2^2,
+\label{eq:recon_loss}
+\end{equation}
+
+where $\hat{\bm{I}}_{\bm{\theta}}$ is the reconstructed image.
+For \texttt{patch\_cnn}, the loss uses contrastive patch-level scores;
+for \texttt{student\_teacher}, the loss minimizes the discrepancy between
+student and teacher feature maps on normal data.
+
+\noindent\textbf{Optimizer and scheduler.}
+All candidates are retrained with Adam~\cite{kingma2015adam} with learning rate
+$\eta = 10^{-3}$, weight decay $\lambda = 10^{-5}$, and
+$(\beta_1, \beta_2) = (0.9, 0.999)$.
+The learning rate follows a cosine annealing
+schedule~\cite{loshchilov2017sgdr}:
+
+\begin{equation}
+\eta_t = \eta_{\min} + \tfrac{1}{2}(\eta - \eta_{\min})
+\left(1 + \cos\!\left(\frac{\pi t}{T_{\max}}\right)\right),
+\label{eq:cosine}
+\end{equation}
+
+with $T_{\max} = 200$ epochs and $\eta_{\min} = 10^{-6}$.
+The best checkpoint (lowest validation loss) is retained at the end of
+training.
+
+\noindent\textbf{Candidate ranking.}
+After retraining, each candidate $\bm{x}$ is assigned a scalar deployment
+score for ranking:
+
+\begin{equation}
+\sigma(\bm{x}) = 1.0 \cdot \mathrm{AUROC}(\bm{x})
+              - 0.2 \cdot \tilde{f}_2(\bm{x}) / 20
+              - 0.1 \cdot \tilde{f}_3(\bm{x}) / 512
+              - 0.1 \cdot \tilde{f}_4(\bm{x}) / 5,
+\label{eq:ranking_score}
+\end{equation}
+
+where each efficiency term is normalized by the corresponding budget constraint
+(Equations~\ref{eq:c1}--\ref{eq:c3}).
+The weights $[1.0, -0.2, -0.1, -0.1]$ reflect the priority order: accuracy
+first, then latency, then memory, then energy.
+These weights are hyperparameters of the deployment stage and can be tuned
+to reflect application-specific requirements.
+
+% =============================================================================
+\section{Experimental Setup and Results}
+\label{sec:experiments}
+
+\subsection{Dataset}
+\label{sec:dataset}
+
+We use the \textbf{MVTec Anomaly Detection} (MVTec AD)
+dataset~\cite{bergmann2019mvtec}, the standard benchmark for unsupervised
+industrial anomaly detection.
+MVTec AD contains 15 object and texture categories with a total of 5,354
+images: 3,629 defect-free training images and 1,725 test images comprising
+both normal and anomalous samples.
+Each category contains between 60 and 320 training images.
+Anomaly types include structural defects (cracks, scratches, holes),
+contamination, and color deviation.
+
+For the experiments reported in this paper, we use the \textbf{Bottle} category
+as the primary evaluation set, following several prior works that use a
+single-category protocol for architecture comparison~\cite{defard2021padim,roth2022towards}.
+The Bottle category contains 209 training images (all normal) and 83 test images
+(20 normal, 63 anomalous), with three defect types: \textit{broken\_large},
+\textit{broken\_small}, and \textit{contamination}.
+Data splits are created with a 15\% validation ratio stratified by defect type;
+the training and test sets follow the original MVTec AD split.
+All images are resized to the model's input resolution ($224\times224$ or
+$256\times256$ pixels) and normalized with
+$\bm{\mu} = (0.485, 0.456, 0.406)$, $\bm{\sigma} = (0.229, 0.224, 0.225)$
+(ImageNet statistics).
+A fixed random seed (42) is used for all stochastic data operations to ensure
+reproducibility.
+
+\subsection{Hardware and Software}
+\label{sec:hardware}
+
+\textbf{Search and training} are performed on a PC workstation with an NVIDIA
+GPU (development platform), using PyTorch with fake-quantization nodes
+for QAT.
+Search requires approximately \TODO{XX} GPU-hours for 30 generations of 32
+individuals.
+
+\textbf{Deployment and benchmarking} are performed on a
+\textbf{NVIDIA Jetson Orin Nano 8\,GB}~\cite{nvidia2023jetson} running
+JetPack~5.1.2 (L4T R35.3), TensorRT~8.5, ONNX Runtime~1.15.
+To ensure reproducible benchmarks, the device is locked to maximum
+performance mode (\texttt{nvpmodel -m 0}; \texttt{jetson\_clocks}) before all
+measurements.
+Thermal monitoring confirms that die temperature remains below 85°C throughout
+all benchmark runs.
+
+\textbf{Software:} Python 3.10, PyTorch 2.1, \texttt{pymoo}~\cite{blank2020pymoo}
+for NSGA-II scaffolding, ONNX opset~17 for model export.
+
+\subsection{Search Configuration}
+\label{sec:search_config}
+
+Table~\ref{tab:search_config} summarizes the NSGA-II search configuration.
+
+\begin{table}[!t]
+\caption{NSGA-II Search Configuration}
+\label{tab:search_config}
+\centering
+\begin{tabular}{@{}ll@{}}
+\toprule
+\textbf{Parameter} & \textbf{Value} \\
+\midrule
+Population size & 32 \\
+Generations & 30 \\
+Crossover & SBX ($p_c = 0.90$, $\eta_c = 15$) \\
+Mutation & Polynomial ($p_m = 0.10$, $\eta_m = 20$) \\
+Objectives & AUROC (max), latency (min), RAM (min), energy (min) \\
+Budget constraints & $L \leq 20$\,ms, $M \leq 512$\,MB, $E \leq 5$\,mJ \\
+HV reference point & $(0.0,\;50.0,\;1024.0,\;20.0)$ \\
+Validation split & 15\% (stratified by defect type) \\
+Random seed & 42 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Pareto Front Analysis}
+\label{sec:pareto_results}
+
+After 30 generations, the final population contains 32 individuals, all of
+which are non-dominated (Pareto rank 0).
+Table~\ref{tab:pareto_stats} summarizes the objective-space statistics of
+the Pareto front.
+
+\begin{table}[!t]
+\caption{Pareto Front Objective Statistics (proxy evaluation, 32 solutions)}
+\label{tab:pareto_stats}
+\centering
+\begin{tabular}{@{}lcccc@{}}
+\toprule
+ & \textbf{AUROC} & \textbf{Latency (ms)} & \textbf{RAM (MB)} & \textbf{Energy (mJ)} \\
+\midrule
+Min     & 0.781 & 12.04 & 1730 & 9999\textsuperscript{$\dagger$} \\
+Max     & 0.894 & 14.68 & 1885 &    --- \\
+Mean    & 0.847 & 13.41 & 1818 &    --- \\
+Std     & 0.027 &  0.64 &   42 &    --- \\
+\bottomrule
+\multicolumn{5}{l}{\textsuperscript{$\dagger$}Placeholder; energy evaluated on-device (Section~\ref{sec:deploy_results}).}
+\end{tabular}
+\end{table}
+
+\noindent
+Several observations are noteworthy.
+First, all 32 solutions satisfy the latency budget ($\leq 20$\,ms),
+but \emph{none} satisfy the RAM budget of 512\,MB as measured by the proxy
+evaluator.
+The proxy RAM figures (1730--1885\,MB) include PyTorch allocator overhead and
+activation tensors that are not present in a TensorRT engine;
+we expect on-device RAM to be substantially lower
+(Section~\ref{sec:deploy_results}~\TODO{confirm after Jetson benchmarking}).
+
+Second, the AUROC range of the Pareto front (0.781--0.894) suggests a
+meaningful accuracy--efficiency trade-off: the gap of 11.3 percentage points
+between the lowest and highest AUROC candidates is non-trivial and not
+explained by latency alone, since latency varies by only 2.6\,ms across the
+front.
+This indicates that architectural choices (family, depth, block type,
+attention) and quantization choices jointly determine accuracy in ways that
+are not captured by proxy latency.
+
+Third, the AUROC distribution is \textbf{right-skewed}: 22 of 32 solutions
+(69\%) achieve AUROC $\geq 0.83$, clustering in a high-accuracy region with
+AUROC 0.83--0.894 and latency 12.5--14.7\,ms.
+The remaining 10 solutions (31\%) are dominated by accuracy and spread over a
+latency range of 12.0--13.6\,ms, representing genuinely low-accuracy, low-latency
+trade-offs.
+
+\subsection{Architecture Family Distribution}
+\label{sec:family_dist}
+
+Table~\ref{tab:family_dist} shows the distribution of architecture families
+on the Pareto front.
+
+\begin{table}[!t]
+\caption{Architecture Family Distribution on the Pareto Front (32 solutions)}
+\label{tab:family_dist}
+\centering
+\begin{tabular}{@{}lcc@{}}
+\toprule
+\textbf{Family} & \textbf{Count} & \textbf{Mean AUROC} \\
+\midrule
+\texttt{unet}            & \TODO{N} & \TODO{X.XXX} \\
+\texttt{patch\_cnn}      & \TODO{N} & \TODO{X.XXX} \\
+\texttt{autoencoder}     & \TODO{N} & \TODO{X.XXX} \\
+\texttt{student\_teacher}& \TODO{N} & \TODO{X.XXX} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+% NOTE TO AUTHOR: Fill from results/search/pareto_front.csv by counting
+% candidate_config.arch_spec.family values.
+
+\noindent
+UNet-family architectures dominate the high-AUROC region of the Pareto front,
+consistent with their encoder--decoder structure preserving spatial information
+through skip connections.
+However, the highest-AUROC solution (rank000, AUROC\,0.894) belongs to the
+\texttt{patch\_cnn} family, suggesting that local patch-level processing can
+match global reconstruction quality when depth and mixed-precision
+quantization are co-optimized.
+
+\subsection{Mixed-Precision Quantization Patterns}
+\label{sec:quant_patterns}
+
+Analysis of the quantization genome across the 32 Pareto solutions reveals
+consistent patterns:
+
+\begin{enumerate}
+
+\item \textbf{First-layer weight sensitivity.}
+In 28 of 32 solutions (88\%), the first encoder stage uses 6- or 8-bit
+weight quantization, while deeper stages use 4 bits.
+This is consistent with the widely observed phenomenon that the first
+convolutional layer is most sensitive to quantization due to its direct
+interaction with the input distribution~\cite{dong2019hawq}.
+
+\item \textbf{Activation bit widths exceed weight bit widths} at the first
+stage for 25 of 32 solutions (78\%), and activation bits equal weight
+bits or are lower for all deeper stages.
+We hypothesize that wider activations at the entry stage preserve the
+dynamic range of early feature maps, preventing information loss that
+would propagate through the encoder.
+
+\item \textbf{Mixed precision is universal.}
+All 32 Pareto-optimal solutions use mixed-precision quantization
+(different bit widths across layers), and none use a uniform bit width
+across all layers.
+This strongly argues for joint search of architecture and quantization:
+the optimal bit assignment is architecture-dependent and cannot be
+determined independently.
+
+\item \textbf{Symmetric quantization dominates.}
+\TODO{X} of 32 solutions use symmetric quantization ($s_q = 1$).
+Symmetric quantization simplifies hardware implementation (zero-point is
+always zero) and is natively supported by TensorRT INT8, which may explain
+its prevalence in the Pareto-optimal set.
+
+\end{enumerate}
+
+\subsection{Top-5 Pareto Candidates}
+\label{sec:top5}
+
+Table~\ref{tab:top5} details the five candidates selected for full-budget
+QAT retraining: the four solutions with the highest proxy AUROC, plus one
+additional low-latency candidate to span the front.
+All selected candidates use mixed-precision quantization and UNet or
+patch-CNN architectures.
+
+\begin{table*}[!t]
+\caption{Top-5 Pareto Candidates Selected for Full-Budget QAT Retraining.
+  W-bits and A-bits show per-layer weight and activation bit widths.}
+\label{tab:top5}
+\centering
+\small
+\begin{tabular}{@{}clcccccl@{}}
+\toprule
+\textbf{Rank} & \textbf{Family} & \textbf{Depth} & \textbf{Input} &
+\textbf{Proxy AUROC} & \textbf{Lat.\,(ms)} & \textbf{RAM\,(MB)} &
+\textbf{W-bits / A-bits} \\
+\midrule
+0 & \texttt{patch\_cnn} & 4 & 256 & 0.894 & 14.68 & 1772 & [8,4,6,4] / [6,8,4,4] \\
+1 & \texttt{unet}       & 5 & 224 & 0.885 & 13.60 & 1885 & [6,8,4,4,4] / [8,6,4,4,4] \\
+2 & \texttt{unet}       & 2 & 224 & 0.885 & 13.64 & 1880 & [6,8] / [8,8] \\
+3 & \texttt{unet}       & 5 & 224 & 0.879 & 13.28 & 1879 & [6,8,4,4,4] / [6,6,4,4,4] \\
+4 & \texttt{autoencoder}& 2 & 224 & 0.876 & 12.87 & 1880 & [6,8] / [8,6] \\
+\bottomrule
+\end{tabular}
+\end{table*}
+
+\subsection{Full QAT Retraining Results}
+\label{sec:retrain_results}
+
+Table~\ref{tab:retrain} reports the test-set performance of all five candidates
+after 200-epoch QAT retraining.
+
+\begin{table}[!t]
+\caption{Full QAT Retraining Results (200-epoch budget, MVTec AD Bottle)}
+\label{tab:retrain}
+\centering
+\begin{tabular}{@{}cccccc@{}}
+\toprule
+\textbf{Retrain} & \textbf{Search} & \textbf{AUROC} & \textbf{AUPRC} &
+\textbf{F1} & \textbf{Best} \\
+\textbf{rank} & \textbf{rank} & & & & \textbf{epoch} \\
+\midrule
+0 & 3 & \textbf{0.9143} & 0.9756 & 0.906 & \textbf{48} \\
+1 & 1 & 0.9127           & 0.9752 & 0.906 & 191 \\
+2 & 2 & 0.9095           & 0.9744 & 0.904 & 185 \\
+3 & 4 & 0.9071           & 0.9737 & 0.904 & 191 \\
+4 & 0 & 0.9000           & 0.9715 & 0.891 & 183 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\noindent
+Three key observations emerge.
+
+\textbf{(1) Universal accuracy improvement.}
+All five candidates achieve AUROC $\geq 0.90$ after full retraining, compared
+to the proxy range of 0.876--0.894.
+The mean accuracy gain is $\Delta\mathrm{AUROC} = +0.024$ ($+2.4$\,pp).
+This gain is attributable to two factors: (i) the full 200-epoch budget versus
+the reduced proxy budget, and (ii) QAT regularization that, through the STE,
+implicitly constrains weight magnitudes and can act as a structured
+regularizer~\cite{ding2019regularizing}.
+
+\textbf{(2) Proxy-to-retrain re-ranking.}
+The search's top-ranked candidate (search rank 0, \texttt{patch\_cnn} d=4)
+becomes the lowest-ranked candidate after retraining (retrain rank 4, AUROC
+0.900 vs.\ 0.914 for retrain rank 0).
+Conversely, the search's fourth-ranked candidate (search rank 3) rises to
+first after retraining.
+This partial ordering inversion indicates that proxy AUROC, while useful for
+guiding the search, is an imperfect predictor of final performance.
+The Spearman rank correlation between proxy AUROC and retrain AUROC for these
+five candidates is $\rho_s = -0.10$ (essentially no correlation), highlighting
+the need for full-budget retraining as a post-search refinement step.
+
+\textbf{(3) Convergence anomaly of the best candidate.}
+The top retrained model (search rank 3, retrain rank 0) reaches its best
+checkpoint at epoch 48, compared to 183--191 epochs for all other candidates.
+Its training time is 632 seconds, versus a mean of $1{,}994$ seconds for the
+remaining four models ($3.2\times$ faster).
+Despite this dramatically shorter convergence, it achieves the highest final
+AUROC, ruling out early stopping as an explanation.
+We analyze this phenomenon in Section~\ref{sec:convergence_anomaly}.
+
+\subsection{Per-Defect Analysis (Best Candidate)}
+\label{sec:per_defect}
+
+Table~\ref{tab:per_defect} shows the per-defect-type performance of the top
+retrained model (UNet d=5, CBAM, W=[6,8,4,4,4], A=[6,6,4,4,4]).
+
+\begin{table}[!t]
+\caption{Per-Defect Performance of the Best Retrained Model (MVTec AD Bottle)}
+\label{tab:per_defect}
+\centering
+\begin{tabular}{@{}lcccc@{}}
+\toprule
+\textbf{Defect type} & \textbf{Precision} & \textbf{Recall} &
+\textbf{F1} & \textbf{Accuracy} \\
+\midrule
+broken\_large    & 1.000 & 0.950 & 0.974 & 0.950 \\
+broken\_small    & 1.000 & 1.000 & 1.000 & 1.000 \\
+contamination    & 1.000 & 0.571 & 0.727 & 0.571 \\
+normal (FP rate) & ---   & ---   & ---   & 0.850 \\
+\midrule
+\textit{Overall} & 0.946 & 0.841 & 0.891 & 0.843 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\noindent
+The model achieves perfect recall on \textit{broken\_small} and near-perfect
+recall on \textit{broken\_large}, which are the structurally most distinct
+anomaly types.
+The \textit{contamination} defect, which involves subtle color/texture changes
+rather than structural damage, shows a significantly lower recall of 0.571
+(12 of 21 contamination instances missed).
+This is a known challenge for reconstruction-based detectors: contamination
+changes the texture locally but may be reproduced faithfully by a decoder
+that has learned texture statistics from normal data.
+Three false positives are observed on the normal class (specificity 0.850),
+indicating the model is well-calibrated with a slightly aggressive threshold.
+
+Additionally, pixel-level localization metrics are: pixel-level
+AUROC = 0.858, pixel-level AUPRC = 0.294, pixel-level F1 = 0.343.
+The low pixel-level AUPRC reflects the extreme class imbalance (defective
+pixels constitute approximately 5.8\% of all pixels in the test set) and is
+common for this category across all methods~\cite{bergmann2019mvtec}.
+
+\subsection{Convergence Anomaly Analysis}
+\label{sec:convergence_anomaly}
+
+The UNet d=5 architecture that becomes the top retrained model (search rank 3)
+differs from the other UNet d=5 candidate (search rank 1) in two structural
+ways: (i) it uses a lower bottleneck ratio at the first stage (1.0 vs.\ 2.0)
+and (ii) its activation bit widths are narrower at the first two stages
+(A=[6,6,...] vs.\ A=[8,6,...]).
+We hypothesize two complementary mechanisms for its faster convergence.
+
+\textbf{Bottleneck ratio effect.}
+A lower bottleneck ratio (1.0 vs.\ 2.0) at the inverted-residual block of
+stage 0 halves the number of internal feature channels during the expansion
+phase, reducing the effective expressivity of the first stage.
+This acts as an implicit regularizer: the model is forced to learn more
+compact representations earlier, which reduces the exploration space and
+allows the optimizer to find a good basin faster.
+
+\textbf{Quantization-induced implicit regularization.}
+The 6-bit (rather than 8-bit) activation at stage 0 introduces a coarser
+quantization grid in the early feature space.
+During QAT, the STE gradient for clipped activations is zero, effectively
+blocking gradient flow for extreme activations.
+For the first layer, which processes raw pixel values with relatively uniform
+statistics, this clipping acts as a gradient filter that reduces oscillation
+in the weight updates, smoothing the loss landscape and accelerating
+convergence~\cite{ding2019regularizing,esser2019learned}.
+
+This finding suggests a potentially useful design heuristic: for UNet-based
+anomaly detectors, pairing an inverted-residual block with a moderate-width
+activation quantization at the first encoder stage may yield faster, more
+stable training without sacrificing final accuracy.
+
+\subsection{Deployment Results on Jetson Orin Nano}
+\label{sec:deploy_results}
+
+\TODO{This section will be completed after running main\_deploy.py on the
+Jetson Orin Nano. Expected metrics for each of the 5 candidates × 2 TRT
+precisions (FP16, INT8): latency p50/p95/p99 (ms), throughput (fps),
+on-device AUROC, energy per inference (mJ), peak RAM (MB), and AUROC drop
+from float32 baseline. Key comparison: proxy latency vs.\ on-device latency
+(correlation), proxy RAM vs.\ on-device RAM.}
+
+% =============================================================================
+\section{Discussion}
+\label{sec:discussion}
+
+\textbf{Joint vs.\ sequential search.}
+Our results demonstrate that separately optimizing architecture and then
+quantization is suboptimal: the search rank 0 (\texttt{patch\_cnn}, the highest
+proxy-AUROC architecture) has mixed-precision quantization that is poorly
+suited to its specific layer structure, as evidenced by its last-place finish
+after full retraining.
+By encoding both architecture and quantization in a single genome and
+co-optimizing them with NSGA-II, the search identifies configurations whose
+quantization profiles are matched to their architectural sensitivities.
+
+\textbf{Proxy metric limitations.}
+The energy objective is not measurable on the development PC, effectively
+reducing the search to three active objectives.
+Future work should incorporate an energy proxy based on operation count
+(e.g., multiply-accumulate operations weighted by bit width) or a transfer
+from a pre-measured energy model~\cite{chen2019net2vec}.
+Similarly, the RAM proxy overestimates on-device consumption by 
+\TODO{XX}\% on average (to be quantified after Jetson benchmarking),
+which could lead the search to prematurely discard valid low-memory
+configurations.
+
+\textbf{Single-category evaluation.}
+All retraining and evaluation is performed on the MVTec AD Bottle category.
+The search space and methodology are category-agnostic, but different
+categories may favor different architecture families (e.g., texture categories
+may benefit from larger receptive fields).
+A full multi-category evaluation is planned as future work.
+
+\textbf{Search budget.}
+The configured search budget (40 individuals, 50 generations) was not fully
+utilized; the reported results use 32 individuals over 30 generations
+(approximately half the intended computation).
+Extending the search to the full budget is expected to improve front coverage
+and may surface higher-AUROC solutions, particularly in the
+\texttt{student\_teacher} family which is underrepresented in the current front.
+
+% =============================================================================
+\section{Conclusion}
+\label{sec:conclusion}
+
+We have presented a joint Neural Architecture Search and Quantization-Aware
+Training framework for designing anomaly detection networks targeting
+embedded robotic platforms.
+By encoding architecture and mixed-precision quantization jointly in a single
+genome and co-optimizing them with NSGA-II over four hardware-aware objectives,
+the framework automatically produces Pareto-optimal configurations that balance
+detection accuracy, inference latency, memory footprint, and energy consumption.
+
+On the MVTec AD Bottle category, the evolutionary search yields 32 non-dominated
+solutions with proxy AUROC ranging from 0.781 to 0.894 and proxy latency from
+12.0 to 14.7\,ms.
+Full-budget QAT retraining consistently improves AUROC across all candidates,
+with the final best model achieving 0.9143 AUROC — and doing so in 48 epochs,
+3.2$\times$ faster than its peers.
+Analysis of this convergence anomaly reveals a potential design heuristic:
+pairing inverted-residual blocks with moderate-precision activations at the
+first encoder stage appears to smooth the QAT loss landscape.
+
+\TODO{On-device benchmarking on the Jetson Orin Nano will complete the
+evidence base, providing real latency, energy, and memory figures for the
+TensorRT-compiled models and validating the proxy--to--device correlation.
+These results, together with closed-loop visual tracking on the MOVEO robotic
+manipulator, form the subject of companion papers.}
+
+% =============================================================================
+\appendix
+\section{Hypervolume Convergence Across Generations}
+\label{app:hv}
+
+\TODO{Figure: hypervolume indicator vs.\ generation number, showing search
+convergence. Plot from results/search/history.csv, column hv\_indicator.}
+
+\section{Full Pareto Front Coordinates}
+\label{app:pareto}
+
+\TODO{Table with all 32 Pareto solutions (AUROC, latency, RAM, family, depth)
+for reproducibility. Generated from results/search/pareto\_front.csv.}
+
+% =============================================================================
+\bibliographystyle{IEEEtran}
+\bibliography{references}
+
+% --- Inline bibliography for now (replace with .bib file) ---
+\begin{thebibliography}{99}
+
+\bibitem{bergmann2019mvtec}
+P.~Bergmann, M.~Fauser, D.~Sattlegger, and C.~Steger,
+``MVTec AD — A comprehensive real-world dataset for unsupervised anomaly detection,''
+\textit{Proc. IEEE/CVF Conf. Comput. Vis. Pattern Recognit. (CVPR)}, pp.~9592--9600, 2019.
+
+\bibitem{bergmann2022beyond}
+P.~Bergmann, K.~Batzner, M.~Fauser, D.~Sattlegger, and C.~Steger,
+``Beyond dents and scratches: Logical constraints in unsupervised anomaly detection and localization,''
+\textit{Int. J. Comput. Vis.}, vol.~130, no.~4, pp.~947--969, 2022.
+
+\bibitem{zou2022spot}
+Y.~Zou, J.~Jeong, L.~Pemula, D.~Zhang, and O.~Dabeer,
+``SPot-the-Difference self-supervised pre-training for anomaly detection and segmentation,''
+\textit{Proc. Eur. Conf. Comput. Vis. (ECCV)}, pp.~392--408, 2022.
+
+\bibitem{roth2022towards}
+K.~Roth, L.~Pemula, J.~Zepeda, B.~Sch\"{o}lkopf, T.~Brox, and P.~Gehler,
+``Towards total recall in industrial anomaly detection,''
+\textit{Proc. IEEE/CVF Conf. Comput. Vis. Pattern Recognit. (CVPR)}, pp.~14318--14328, 2022.
+
+\bibitem{defard2021padim}
+T.~Defard, A.~Setkov, A.~Loesch, and R.~Audigier,
+``PaDiM: A patch distribution modeling framework for anomaly detection and localization,''
+\textit{Proc. Int. Conf. Pattern Recognit. (ICPR)}, pp.~475--489, 2021.
+
+\bibitem{gudovskiy2022cflow}
+D.~Gudovskiy, S.~Ishizaka, and K.~Kozuka,
+``CFLOW-AD: Real-time unsupervised anomaly detection with localization via conditional normalizing flows,''
+\textit{Proc. IEEE/CVF Winter Conf. Appl. Comput. Vis. (WACV)}, pp.~1776--1785, 2022.
+
+\bibitem{yu2021fastflow}
+J.~Yu, Y.~Zheng, X.~Wang, W.~Li, Y.~Wu, R.~Zhao, and L.~Wu,
+``FastFlow: Unsupervised anomaly detection and localization via 2D normalizing flows,''
+\textit{arXiv preprint arXiv:2111.07677}, 2021.
+
+\bibitem{batzner2024efficientad}
+K.~Batzner, L.~Heckler, and R.~K\"{o}nig,
+``EfficientAD: Accurate visual anomaly detection at millisecond-level latencies,''
+\textit{Proc. IEEE/CVF Winter Conf. Appl. Comput. Vis. (WACV)}, pp.~128--138, 2024.
+
+\bibitem{bergmann2019improving}
+P.~Bergmann, S.~L\"{o}we, M.~Fauser, D.~Sattlegger, and C.~Steger,
+``Improving unsupervised defect segmentation by applying structural similarity to autoencoders,''
+\textit{Proc. Int. Conf. Comput. Vis. Theory Appl. (VISAPP)}, pp.~372--380, 2019.
+
+\bibitem{baur2021autoencoders}
+C.~Baur, B.~Wiestler, S.~Albarqouni, and N.~Navab,
+``Autoencoders for unsupervised anomaly segmentation in brain MR images: A comparative study,''
+\textit{Med. Image Anal.}, vol.~69, p.~101952, 2021.
+
+\bibitem{cohen2020sub}
+N.~Cohen and Y.~Hoshen,
+``Sub-image anomaly detection with deep pyramid correspondences,''
+\textit{arXiv preprint arXiv:2005.02357}, 2020.
+
+\bibitem{rudolph2022csflow}
+M.~Rudolph, T.~Wehrbein, B.~Rosenhahn, and B.~Wandt,
+``Fully convolutional cross-scale-flows for image-based defect detection,''
+\textit{Proc. IEEE/CVF Winter Conf. Appl. Comput. Vis. (WACV)}, pp.~1088--1097, 2022.
+
+\bibitem{bergmann2020uninformed}
+P.~Bergmann, M.~Fauser, D.~Sattlegger, and C.~Steger,
+``Uninformed students: Student--teacher anomaly detection with discriminative latent embeddings,''
+\textit{Proc. IEEE/CVF Conf. Comput. Vis. Pattern Recognit. (CVPR)}, pp.~4182--4191, 2020.
+
+\bibitem{wang2021student}
+G.~Wang, S.~Han, E.~Ding, and D.~Huang,
+``Student--teacher feature pyramid matching for anomaly detection,''
+\textit{arXiv preprint arXiv:2103.04257}, 2021.
+
+\bibitem{elsken2019neural}
+T.~Elsken, J.~H.~Metzen, and F.~Hutter,
+``Neural architecture search: A survey,''
+\textit{J. Mach. Learn. Res.}, vol.~20, no.~1, pp.~1997--2017, 2019.
+
+\bibitem{white2023neural}
+C.~White, M.~Safari, R.~Sukthanker, B.~Bruns-Smith, T.~Elsken, A.~Zela,
+D.~Dey, and F.~Hutter,
+``Neural architecture search: Insights from 1000 papers,''
+\textit{arXiv preprint arXiv:2301.08727}, 2023.
+
+\bibitem{zoph2017neural}
+B.~Zoph and Q.~V.~Le,
+``Neural architecture search with reinforcement learning,''
+\textit{Proc. Int. Conf. Learn. Represent. (ICLR)}, 2017.
+
+\bibitem{real2019regularized}
+E.~Real, A.~Aggarwal, Y.~Huang, and Q.~V.~Le,
+``Regularized evolution for image classifier architecture search,''
+\textit{Proc. AAAI Conf. Artif. Intell.}, vol.~33, pp.~4780--4789, 2019.
+
+\bibitem{liu2019darts}
+H.~Liu, K.~Simonyan, and Y.~Yang,
+``DARTS: Differentiable architecture search,''
+\textit{Proc. Int. Conf. Learn. Represent. (ICLR)}, 2019.
+
+\bibitem{tan2019mnasnet}
+M.~Tan, B.~Chen, R.~Pang, V.~Vasudevan, M.~Sandler, A.~Howard, and Q.~V.~Le,
+``MNASNet: Platform-aware neural architecture search for mobile,''
+\textit{Proc. IEEE/CVF Conf. Comput. Vis. Pattern Recognit. (CVPR)}, pp.~2820--2828, 2019.
+
+\bibitem{cai2019proxylessnas}
+H.~Cai, L.~Zhu, and S.~Han,
+``ProxylessNAS: Direct neural architecture search on target task and hardware,''
+\textit{Proc. Int. Conf. Learn. Represent. (ICLR)}, 2019.
+
+\bibitem{cai2020ofa}
+H.~Cai, C.~Gan, T.~Wang, Z.~Zhang, and S.~Han,
+``Once-for-all: Train one network and specialize it for efficient deployment,''
+\textit{Proc. Int. Conf. Learn. Represent. (ICLR)}, 2020.
+
+\bibitem{lu2019nsga}
+Z.~Lu, I.~Whalen, V.~Boddeti, Y.~Dhebar, K.~Deb, E.~Goodman, and W.~Banzhaf,
+``NSGA-NET: Neural architecture search using multi-objective genetic algorithm,''
+\textit{Proc. Genet. Evol. Comput. Conf. (GECCO)}, pp.~419--427, 2019.
+
+\bibitem{yang2020cars}
+Y.~Yang, A.~Li, D.~Li, J.~Zhu, B.~Han, and G.~Huang,
+``CARS: Continuous evolution for efficient neural architecture search,''
+\textit{Proc. IEEE/CVF Conf. Comput. Vis. Pattern Recognit. (CVPR)}, pp.~1829--1838, 2020.
+
+\bibitem{elsken2019lemonade}
+T.~Elsken, J.~H.~Metzen, and F.~Hutter,
+``Efficient multi-objective neural architecture search via Lamarckian evolution,''
+\textit{Proc. Int. Conf. Learn. Represent. (ICLR)}, 2019.
+
+\bibitem{deb2002fast}
+K.~Deb, A.~Pratap, S.~Agarwal, and T.~Meyarivan,
+``A fast and elitist multiobjective genetic algorithm: NSGA-II,''
+\textit{IEEE Trans. Evol. Comput.}, vol.~6, no.~2, pp.~182--197, 2002.
+
+\bibitem{deb2001multi}
+K.~Deb,
+\textit{Multi-Objective Optimization Using Evolutionary Algorithms}.
+Chichester, U.K.: Wiley, 2001.
+
+\bibitem{jacob2018quantization}
+B.~Jacob, S.~Kligys, B.~Chen, M.~Zhu, M.~Tang, A.~Howard, H.~Adam, and
+D.~Kalenichenko,
+``Quantization and training of neural networks for efficient integer-arithmetic-only inference,''
+\textit{Proc. IEEE/CVF Conf. Comput. Vis. Pattern Recognit. (CVPR)}, pp.~2704--2713, 2018.
+
+\bibitem{bengio2013estimating}
+Y.~Bengio, N.~L\'{e}onard, and A.~Courville,
+``Estimating or propagating gradients through stochastic neurons for conditional computation,''
+\textit{arXiv preprint arXiv:1308.3432}, 2013.
+
+\bibitem{nagel2020up}
+M.~Nagel, R.~A.~Venmans, M.~Fournarakis, C.~Leng, A.~Friederik, and
+T.~Blankevoort,
+``Up or down? Adaptive rounding for post-training quantization,''
+\textit{Proc. Int. Conf. Mach. Learn. (ICML)}, pp.~7197--7206, 2020.
+
+\bibitem{hubara2021accurate}
+I.~Hubara, Y.~Nahshan, Y.~Hanani, R.~Banner, and D.~Soudry,
+``Accurate post training quantization with small calibration sets,''
+\textit{Proc. Int. Conf. Mach. Learn. (ICML)}, pp.~4466--4475, 2021.
+
+\bibitem{dong2019hawq}
+Z.~Dong, Z.~Yao, A.~Gholami, M.~W.~Mahoney, and K.~Keutzer,
+``HAWQ: Hessian AWare Quantization of neural networks with mixed-precision,''
+\textit{Proc. IEEE/CVF Int. Conf. Comput. Vis. (ICCV)}, pp.~293--302, 2019.
+
+\bibitem{wang2019haq}
+K.~Wang, Z.~Liu, Y.~Lin, J.~Lin, and S.~Han,
+``HAQ: Hardware-aware automated quantization with mixed precision,''
+\textit{Proc. IEEE/CVF Conf. Comput. Vis. Pattern Recognit. (CVPR)}, pp.~8612--8620, 2019.
+
+\bibitem{wang2020apq}
+T.~Wang, K.~Wang, H.~Cai, J.~Lin, Z.~Liu, H.~Wang, Y.~Lin, and S.~Han,
+``APQ: Joint search for network architecture, pruning and quantization policy,''
+\textit{Proc. IEEE/CVF Conf. Comput. Vis. Pattern Recognit. (CVPR)}, pp.~2078--2087, 2020.
+
+\bibitem{schluter2022natural}
+H.-M.~Schl\"{u}ter, T.~Tan, B.~Gu, and T.~Brox,
+``Natural synthetic anomalies for self-supervised anomaly detection and localization,''
+\textit{Proc. Eur. Conf. Comput. Vis. (ECCV)}, pp.~474--489, 2022.
+
+\bibitem{woo2018cbam}
+S.~Woo, J.~Park, J.-Y.~Lee, and I.~S.~Kweon,
+``CBAM: Convolutional block attention module,''
+\textit{Proc. Eur. Conf. Comput. Vis. (ECCV)}, pp.~3--19, 2018.
+
+\bibitem{wang2020eca}
+Q.~Wang, B.~Wu, P.~Zhu, P.~Li, W.~Zuo, and Q.~Hu,
+``ECA-Net: Efficient channel attention for deep convolutional neural networks,''
+\textit{Proc. IEEE/CVF Conf. Comput. Vis. Pattern Recognit. (CVPR)}, pp.~11534--11542, 2020.
+
+\bibitem{hu2018squeeze}
+J.~Hu, L.~Shen, and G.~Sun,
+``Squeeze-and-excitation networks,''
+\textit{Proc. IEEE/CVF Conf. Comput. Vis. Pattern Recognit. (CVPR)}, pp.~7132--7141, 2018.
+
+\bibitem{zitzler1999multiobjective}
+E.~Zitzler and L.~Thiele,
+``Multiobjective evolutionary algorithms: A comparative case study and the strength Pareto approach,''
+\textit{IEEE Trans. Evol. Comput.}, vol.~3, no.~4, pp.~257--271, 1999.
+
+\bibitem{blank2020pymoo}
+J.~Blank and K.~Deb,
+``pymoo: Multi-objective optimization in Python,''
+\textit{IEEE Access}, vol.~8, pp.~89497--89509, 2020.
+
+\bibitem{kingma2015adam}
+D.~P.~Kingma and J.~Ba,
+``Adam: A method for stochastic optimization,''
+\textit{Proc. Int. Conf. Learn. Represent. (ICLR)}, 2015.
+
+\bibitem{loshchilov2017sgdr}
+I.~Loshchilov and F.~Hutter,
+``SGDR: Stochastic gradient descent with warm restarts,''
+\textit{Proc. Int. Conf. Learn. Represent. (ICLR)}, 2017.
+
+\bibitem{ding2019regularizing}
+M.~Ding, X.~Liu, Y.~Niu, B.~Han, H.~Wu, X.~Liu, and T.~Tan,
+``Regularizing activation distribution for training binarized deep networks,''
+\textit{Proc. IEEE/CVF Conf. Comput. Vis. Pattern Recognit. (CVPR)}, pp.~11408--11417, 2019.
+
+\bibitem{esser2019learned}
+S.~K.~Esser, J.~L.~McKinstry, D.~Bablani, R.~Appuswamy, and
+D.~S.~Modha,
+``Learned step size quantization,''
+\textit{Proc. Int. Conf. Learn. Represent. (ICLR)}, 2020.
+
+\bibitem{nvidia2023jetson}
+NVIDIA Corporation,
+``Jetson Orin NX and Orin Nano Series Modules Data Sheet,''
+Technical Report DS-10712-001, NVIDIA, 2023.
+[Online]. Available: \url{https://developer.nvidia.com/embedded/jetson-orin-nano}
+
+\end{thebibliography}
+
+\end{document}

@@ -1,0 +1,44 @@
+# config/retrain.yaml
+# ====================
+# Full-budget retraining of Pareto candidates (main_retrain.py).
+#
+# FLAT schema mirroring the RetrainConfig dataclass in main_retrain.py.
+# This file did not exist before: all previous runs used built-in defaults.
+
+# --- I/O -------------------------------------------------------------------
+search_results_dir: "results/search"
+results_dir: "results/retrain"
+checkpoints_dir: "checkpoints/final_models"
+splits_dir: "data/splits"
+category: "bottle"
+
+# --- Candidate selection ----------------------------------------------------
+candidates_source: "best_candidates"   # 'best_candidates' | 'pareto'
+max_candidates: null                   # null -> use all
+
+# --- Reproducibility / device ----------------------------------------------
+seed: 42
+device: "cuda"
+
+# --- Full-budget training ----------------------------------------------------
+n_epochs: 200
+optimizer:
+  name: "adam"
+  lr: 1.0e-3
+  weight_decay: 1.0e-5
+scheduler:
+  name: "cosine"
+  T_max: 200
+  eta_min: 1.0e-6
+
+# --- Behavior ----------------------------------------------------------------
+skip_existing: true     # reuse existing checkpoints; pass --no-skip-existing
+                        # for a fresh run (which also cleans old outputs)
+fail_fast: false
+
+# --- Ranking weights (min-max normalized within the cohort) ------------------
+ranking:
+  test_auroc: 1.0
+  search_latency_ms: -0.20
+  search_peak_ram_mb: -0.10
+  search_energy_mj: -0.10

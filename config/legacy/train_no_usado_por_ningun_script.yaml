@@ -1,0 +1,217 @@
+# config/train.yaml
+# ==================
+# Training configuration for anomaly-detection models on MVTec-AD.
+#
+# Covers three sequential phases:
+#   1. pre_train  — full-precision backbone feature learning.
+#   2. finetune   — task-specific anomaly head training (lower LR).
+#   3. qat        — Quantization-Aware Training (fake-quantize nodes active).
+#
+# Inherit and override for category-specific or hardware-specific runs:
+#   base: config/train.yaml
+
+# ─────────────────────────────────────────────────────────────────────────
+# Data
+# ─────────────────────────────────────────────────────────────────────────
+data:
+  dataset_root:   data/mvtec_anomaly_detection
+  categories:
+    - bottle
+    - cable
+    - capsule
+    - carpet
+    - grid
+    - hazelnut
+    - leather
+    - metal_nut
+    - pill
+    - screw
+    - tile
+    - toothbrush
+    - transistor
+    - wood
+    - zipper
+
+  image_size:   256             # Resize shortest edge; centre-crop to square.
+  batch_size:   32
+  num_workers:  4               # Reduce to 0 on Jetson if shared RAM is tight.
+  pin_memory:   true
+  drop_last:    true            # Avoid partial batches in distributed mode.
+
+  # Normalisation (ImageNet statistics).
+  mean: [0.485, 0.456, 0.406]
+  std:  [0.229, 0.224, 0.225]
+
+  # Augmentation — applied only to training split.
+  augmentation:
+    horizontal_flip:  true
+    vertical_flip:    false
+    rotation_deg:     5
+    color_jitter:
+      brightness: 0.2
+      contrast:   0.2
+      saturation: 0.1
+      hue:        0.05
+    random_erasing:
+      probability: 0.10
+      scale: [0.02, 0.10]
+
+# ─────────────────────────────────────────────────────────────────────────
+# Phase 1 — Pre-training (full precision)
+# ─────────────────────────────────────────────────────────────────────────
+pre_train:
+  enabled: true
+  epochs:  100
+
+  optimizer:
+    name:         adamw
+    lr:           1.0e-3
+    weight_decay: 1.0e-4
+    betas:        [0.9, 0.999]
+    eps:          1.0e-8
+
+  scheduler:
+    name:          cosine_annealing_warm_restarts
+    T_0:           20           # First restart after 20 epochs.
+    T_mult:        2            # Subsequent cycles double in length.
+    eta_min:       1.0e-6
+    warmup_epochs: 5
+    warmup_lr_init: 1.0e-5
+
+  gradient:
+    clip_norm:     1.0          # Gradient norm clipping (null to disable).
+    accumulation_steps: 1       # Effective batch = batch_size × accumulation_steps.
+
+  # Mixed-precision training (FP16 autocast on GPU).
+  mixed_precision: true
+
+  # Early stopping.
+  early_stopping:
+    enabled:   true
+    patience:  15               # Epochs without val-loss improvement.
+    min_delta: 1.0e-4
+
+  checkpoint:
+    save_best: true
+    save_last: true
+    monitor:   val_auroc        # val_auroc | val_loss
+    mode:      max              # max (auroc) | min (loss)
+
+# ─────────────────────────────────────────────────────────────────────────
+# Phase 2 — Fine-tuning (anomaly head)
+# ─────────────────────────────────────────────────────────────────────────
+finetune:
+  enabled: true
+  epochs:  30
+
+  # Freeze backbone weights; train only the decoder / scoring head.
+  freeze_backbone: true
+
+  optimizer:
+    name:         adamw
+    lr:           1.0e-4
+    weight_decay: 1.0e-5
+
+  scheduler:
+    name:    cosine_annealing
+    T_max:   30
+    eta_min: 1.0e-7
+
+  mixed_precision: true
+
+  early_stopping:
+    enabled:  true
+    patience: 10
+
+  checkpoint:
+    save_best: true
+    monitor:   val_auroc
+    mode:      max
+
+# ─────────────────────────────────────────────────────────────────────────
+# Phase 3 — Quantization-Aware Training
+# ─────────────────────────────────────────────────────────────────────────
+qat:
+  enabled: true
+  epochs:  10
+
+  # Quantization scheme (must match search.yaml quantization section).
+  bits_weights:       8
+  bits_activations:   8
+  per_channel:        true
+  symmetric:          true
+
+  # Observer calibration before QAT loop starts.
+  calibration_batches: 50       # Number of batches for activation range stats.
+
+  optimizer:
+    name:         sgd
+    lr:           1.0e-5        # Much lower than pre-train; weights are nearly frozen.
+    momentum:     0.9
+    weight_decay: 0.0
+    nesterov:     true
+
+  scheduler:
+    name:    linear_decay
+    end_lr:  1.0e-7
+
+  mixed_precision: false        # QAT and FP16 autocast are incompatible.
+
+  early_stopping:
+    enabled:  true
+    patience: 5
+
+  checkpoint:
+    save_best: true
+    monitor:   val_auroc
+    mode:      max
+
+# ─────────────────────────────────────────────────────────────────────────
+# Loss functions
+# ─────────────────────────────────────────────────────────────────────────
+loss:
+  reconstruction:
+    name:   l2                  # l2 | l1 | ssim | combined
+    weight: 1.0
+
+  feature_matching:
+    name:   cosine              # cosine | l2
+    weight: 0.5
+    layers: [layer2, layer3]    # Backbone feature layers to match.
+
+  # Combined loss: total = reconstruction + feature_matching.
+
+# ─────────────────────────────────────────────────────────────────────────
+# Evaluation
+# ─────────────────────────────────────────────────────────────────────────
+evaluation:
+  metrics:
+    - auroc
+    - aupro                     # Area Under the Per-Region Overlap curve.
+    - f1_at_best_threshold
+    - average_precision
+
+  # Anomaly score threshold selection strategy.
+  threshold:
+    method:     percentile      # percentile | fixed | otsu
+    percentile: 95.0            # Applied to normal-sample score distribution.
+
+  # Heatmap upsampling for pixel-level metrics.
+  upsample_mode: bilinear       # bilinear | nearest | bicubic
+
+# ─────────────────────────────────────────────────────────────────────────
+# Reproducibility
+# ─────────────────────────────────────────────────────────────────────────
+reproducibility:
+  seed: 42
+  deterministic_cudnn: true
+  benchmark_cudnn:     false
+
+# ─────────────────────────────────────────────────────────────────────────
+# Output
+# ─────────────────────────────────────────────────────────────────────────
+output:
+  dir:              runs/train
+  log_every_n_steps: 10
+  val_every_n_epochs: 1
+  save_heatmaps:    false       # True → save per-image heatmaps during eval.

@@ -1,0 +1,415 @@
+{
+  "objective_names": [
+    "neg_auroc",
+    "latency_ms",
+    "peak_ram_mb",
+    "energy_mj"
+  ],
+  "candidates": [
+    {
+      "rank": 0,
+      "individual_index": 0,
+      "objectives": {
+        "neg_auroc": -0.8944444444444445,
+        "latency_ms": 14.67645133336385,
+        "peak_ram_mb": 1772.4492,
+        "energy_mj": 9999.0
+      },
+      "candidate": {
+        "arch_spec": {
+          "family": "patch_cnn",
+          "input_size": 256,
+          "depth": 4,
+          "channels": [
+            24,
+            192,
+            24,
+            192
+          ],
+          "kernel_size": [
+            7,
+            7,
+            7,
+            5
+          ],
+          "block_type": [
+            "ir",
+            "conv",
+            "ir",
+            "ds"
+          ],
+          "bottleneck_ratio": [
+            2.0,
+            2.0,
+            0.5,
+            0.5
+          ],
+          "skip_connections": [
+            false,
+            false,
+            true,
+            true
+          ],
+          "attention": [
+            "cbam",
+            "eca",
+            "none",
+            "spatial"
+          ]
+        },
+        "quant_spec": {
+          "weight_bits": [
+            8,
+            4,
+            6,
+            4
+          ],
+          "act_bits": [
+            6,
+            8,
+            4,
+            4
+          ],
+          "symmetric": true,
+          "per_channel": false,
+          "mixed_precision": true,
+          "global_weight_bits": 6,
+          "global_act_bits": 6,
+          "layer_weight_bits": [
+            8,
+            4,
+            6,
+            4
+          ],
+          "layer_act_bits": [
+            6,
+            8,
+            4,
+            4
+          ]
+        }
+      },
+      "metrics": {}
+    },
+    {
+      "rank": 1,
+      "individual_index": 2,
+      "objectives": {
+        "neg_auroc": -0.884920634920635,
+        "latency_ms": 13.600083128611248,
+        "peak_ram_mb": 1885.1133,
+        "energy_mj": 9999.0
+      },
+      "candidate": {
+        "arch_spec": {
+          "family": "unet",
+          "input_size": 224,
+          "depth": 5,
+          "channels": [
+            16,
+            16,
+            192,
+            16,
+            16
+          ],
+          "kernel_size": [
+            5,
+            7,
+            7,
+            3,
+            3
+          ],
+          "block_type": [
+            "ir",
+            "ds",
+            "conv",
+            "conv",
+            "conv"
+          ],
+          "bottleneck_ratio": [
+            2.0,
+            1.0,
+            0.5,
+            0.5,
+            0.5
+          ],
+          "skip_connections": [
+            true,
+            false,
+            false,
+            false,
+            false
+          ],
+          "attention": [
+            "cbam",
+            "none",
+            "none",
+            "none",
+            "none"
+          ]
+        },
+        "quant_spec": {
+          "weight_bits": [
+            6,
+            8,
+            4,
+            4,
+            4
+          ],
+          "act_bits": [
+            8,
+            6,
+            4,
+            4,
+            4
+          ],
+          "symmetric": true,
+          "per_channel": true,
+          "mixed_precision": true,
+          "global_weight_bits": 8,
+          "global_act_bits": 6,
+          "layer_weight_bits": [
+            6,
+            8,
+            4,
+            4,
+            4
+          ],
+          "layer_act_bits": [
+            8,
+            6,
+            4,
+            4,
+            4
+          ]
+        }
+      },
+      "metrics": {}
+    },
+    {
+      "rank": 2,
+      "individual_index": 30,
+      "objectives": {
+        "neg_auroc": -0.884920634920635,
+        "latency_ms": 13.644845835367839,
+        "peak_ram_mb": 1880.2383,
+        "energy_mj": 9999.0
+      },
+      "candidate": {
+        "arch_spec": {
+          "family": "unet",
+          "input_size": 224,
+          "depth": 2,
+          "channels": [
+            32,
+            96
+          ],
+          "kernel_size": [
+            5,
+            7
+          ],
+          "block_type": [
+            "ir",
+            "ds"
+          ],
+          "bottleneck_ratio": [
+            6.0,
+            1.0
+          ],
+          "skip_connections": [
+            false,
+            true
+          ],
+          "attention": [
+            "se",
+            "none"
+          ]
+        },
+        "quant_spec": {
+          "weight_bits": [
+            6,
+            8
+          ],
+          "act_bits": [
+            8,
+            8
+          ],
+          "symmetric": true,
+          "per_channel": true,
+          "mixed_precision": true,
+          "global_weight_bits": 6,
+          "global_act_bits": 6,
+          "layer_weight_bits": [
+            6,
+            8
+          ],
+          "layer_act_bits": [
+            8,
+            8
+          ]
+        }
+      },
+      "metrics": {}
+    },
+    {
+      "rank": 3,
+      "individual_index": 20,
+      "objectives": {
+        "neg_auroc": -0.8785714285714286,
+        "latency_ms": 13.284570693969727,
+        "peak_ram_mb": 1879.3672,
+        "energy_mj": 9999.0
+      },
+      "candidate": {
+        "arch_spec": {
+          "family": "unet",
+          "input_size": 224,
+          "depth": 5,
+          "channels": [
+            16,
+            16,
+            192,
+            16,
+            16
+          ],
+          "kernel_size": [
+            5,
+            7,
+            3,
+            3,
+            3
+          ],
+          "block_type": [
+            "ir",
+            "ds",
+            "conv",
+            "conv",
+            "conv"
+          ],
+          "bottleneck_ratio": [
+            6.0,
+            1.0,
+            0.5,
+            0.5,
+            0.5
+          ],
+          "skip_connections": [
+            true,
+            false,
+            false,
+            false,
+            false
+          ],
+          "attention": [
+            "cbam",
+            "none",
+            "none",
+            "none",
+            "none"
+          ]
+        },
+        "quant_spec": {
+          "weight_bits": [
+            6,
+            8,
+            4,
+            4,
+            4
+          ],
+          "act_bits": [
+            6,
+            6,
+            4,
+            4,
+            4
+          ],
+          "symmetric": true,
+          "per_channel": false,
+          "mixed_precision": true,
+          "global_weight_bits": 6,
+          "global_act_bits": 6,
+          "layer_weight_bits": [
+            6,
+            8,
+            4,
+            4,
+            4
+          ],
+          "layer_act_bits": [
+            6,
+            6,
+            4,
+            4,
+            4
+          ]
+        }
+      },
+      "metrics": {}
+    },
+    {
+      "rank": 4,
+      "individual_index": 29,
+      "objectives": {
+        "neg_auroc": -0.8761904761904762,
+        "latency_ms": 12.867824077606201,
+        "peak_ram_mb": 1879.9844,
+        "energy_mj": 9999.0
+      },
+      "candidate": {
+        "arch_spec": {
+          "family": "autoencoder",
+          "input_size": 224,
+          "depth": 2,
+          "channels": [
+            96,
+            96
+          ],
+          "kernel_size": [
+            5,
+            7
+          ],
+          "block_type": [
+            "ir",
+            "ds"
+          ],
+          "bottleneck_ratio": [
+            6.0,
+            1.0
+          ],
+          "skip_connections": [
+            true,
+            false
+          ],
+          "attention": [
+            "cbam",
+            "none"
+          ]
+        },
+        "quant_spec": {
+          "weight_bits": [
+            6,
+            8
+          ],
+          "act_bits": [
+            8,
+            6
+          ],
+          "symmetric": true,
+          "per_channel": true,
+          "mixed_precision": true,
+          "global_weight_bits": 6,
+          "global_act_bits": 6,
+          "layer_weight_bits": [
+            6,
+            8
+          ],
+          "layer_act_bits": [
+            8,
+            6
+          ]
+        }
+      },
+      "metrics": {}
+    }
+  ]
+}

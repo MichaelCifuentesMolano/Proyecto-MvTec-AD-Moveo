@@ -1,0 +1,43 @@
+# config/deploy.yaml
+# ===================
+# Configuration for the embedded-deployment stage (main_deploy.py)
+
+# Input/Output directories (relative to project root)
+retrain_results_dir: "results/retrain"
+checkpoints_dir: "checkpoints/final_models"
+deploy_dir: "deployment/models"
+results_dir: "results/deploy"
+splits_dir: "data/splits"
+category: "bottle"
+
+# Candidate selection
+candidates_source: "model_ranked"  # 'model_ranked' or 'final_metrics'
+max_candidates: 5
+
+# Conversion / benchmarking settings
+input_shape: [1, 3, 224, 224]      # Input tensor shape [B, C, H, W]
+onnx_opset: 17
+precisions: ["fp16", "int8"]       # Swept precisions for TensorRT engines
+workspace_mb: 1024                 # Builder optimization workspace (1 GB)
+n_warmup: 50
+n_iters: 500
+
+# Reproducibility / device
+seed: 42
+device: "cuda"
+
+# Execution behavior
+skip_existing_engine: true         # Skip conversion if ONNX/engine files already exist
+fail_fast: false                   # Do not abort batch execution on single failure
+
+# Embedded ranking weights (min-max normalized inside the cohort)
+# AUROC is "higher is better" (positive weight)
+# Latency, Energy, RAM are "lower is better" (negative weights)
+ranking:
+  on_device_auroc: 1.0
+  latency_ms_p95: -0.3
+  energy_mj_per_inf: -0.2
+  peak_ram_mb: -0.1
+
+# Tolerance threshold for AUROC drop compared to full-precision retraining
+auroc_drop_threshold: 0.02

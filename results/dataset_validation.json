@@ -1,0 +1,451 @@
+{
+  "categories": [
+    "bottle",
+    "cable",
+    "capsule",
+    "carpet",
+    "grid",
+    "hazelnut",
+    "leather",
+    "metal_nut",
+    "pill",
+    "screw",
+    "tile",
+    "toothbrush",
+    "transistor",
+    "wood",
+    "zipper"
+  ],
+  "elapsed_seconds": 42.966,
+  "expected_categories": [
+    "bottle",
+    "cable",
+    "capsule",
+    "carpet",
+    "grid",
+    "hazelnut",
+    "leather",
+    "metal_nut",
+    "pill",
+    "screw",
+    "tile",
+    "toothbrush",
+    "transistor",
+    "wood",
+    "zipper"
+  ],
+  "issues": [],
+  "missing_categories": [],
+  "n_corrupt": 0,
+  "n_masks": 1258,
+  "n_missing_masks": 0,
+  "n_test": 1725,
+  "n_train": 3629,
+  "per_category": {
+    "bottle": {
+      "category_root": "C:\\Users\\Maicol\\Desktop\\Proyecto MvTec AD\\data\\raw\\mvtec_ad\\bottle",
+      "corrupt_files": [],
+      "defect_types": [
+        "broken_large",
+        "broken_small",
+        "contamination"
+      ],
+      "issues": [],
+      "missing_masks": [],
+      "missing_paths": [],
+      "n_masks": 63,
+      "n_per_defect": {
+        "broken_large": 20,
+        "broken_small": 22,
+        "contamination": 21
+      },
+      "n_test": 83,
+      "n_test_defect": 63,
+      "n_test_good": 20,
+      "n_train_good": 209,
+      "valid": true
+    },
+    "cable": {
+      "category_root": "C:\\Users\\Maicol\\Desktop\\Proyecto MvTec AD\\data\\raw\\mvtec_ad\\cable",
+      "corrupt_files": [],
+      "defect_types": [
+        "bent_wire",
+        "cable_swap",
+        "combined",
+        "cut_inner_insulation",
+        "cut_outer_insulation",
+        "missing_cable",
+        "missing_wire",
+        "poke_insulation"
+      ],
+      "issues": [],
+      "missing_masks": [],
+      "missing_paths": [],
+      "n_masks": 92,
+      "n_per_defect": {
+        "bent_wire": 13,
+        "cable_swap": 12,
+        "combined": 11,
+        "cut_inner_insulation": 14,
+        "cut_outer_insulation": 10,
+        "missing_cable": 12,
+        "missing_wire": 10,
+        "poke_insulation": 10
+      },
+      "n_test": 150,
+      "n_test_defect": 92,
+      "n_test_good": 58,
+      "n_train_good": 224,
+      "valid": true
+    },
+    "capsule": {
+      "category_root": "C:\\Users\\Maicol\\Desktop\\Proyecto MvTec AD\\data\\raw\\mvtec_ad\\capsule",
+      "corrupt_files": [],
+      "defect_types": [
+        "crack",
+        "faulty_imprint",
+        "poke",
+        "scratch",
+        "squeeze"
+      ],
+      "issues": [],
+      "missing_masks": [],
+      "missing_paths": [],
+      "n_masks": 109,
+      "n_per_defect": {
+        "crack": 23,
+        "faulty_imprint": 22,
+        "poke": 21,
+        "scratch": 23,
+        "squeeze": 20
+      },
+      "n_test": 132,
+      "n_test_defect": 109,
+      "n_test_good": 23,
+      "n_train_good": 219,
+      "valid": true
+    },
+    "carpet": {
+      "category_root": "C:\\Users\\Maicol\\Desktop\\Proyecto MvTec AD\\data\\raw\\mvtec_ad\\carpet",
+      "corrupt_files": [],
+      "defect_types": [
+        "color",
+        "cut",
+        "hole",
+        "metal_contamination",
+        "thread"
+      ],
+      "issues": [],
+      "missing_masks": [],
+      "missing_paths": [],
+      "n_masks": 89,
+      "n_per_defect": {
+        "color": 19,
+        "cut": 17,
+        "hole": 17,
+        "metal_contamination": 17,
+        "thread": 19
+      },
+      "n_test": 117,
+      "n_test_defect": 89,
+      "n_test_good": 28,
+      "n_train_good": 280,
+      "valid": true
+    },
+    "grid": {
+      "category_root": "C:\\Users\\Maicol\\Desktop\\Proyecto MvTec AD\\data\\raw\\mvtec_ad\\grid",
+      "corrupt_files": [],
+      "defect_types": [
+        "bent",
+        "broken",
+        "glue",
+        "metal_contamination",
+        "thread"
+      ],
+      "issues": [],
+      "missing_masks": [],
+      "missing_paths": [],
+      "n_masks": 57,
+      "n_per_defect": {
+        "bent": 12,
+        "broken": 12,
+        "glue": 11,
+        "metal_contamination": 11,
+        "thread": 11
+      },
+      "n_test": 78,
+      "n_test_defect": 57,
+      "n_test_good": 21,
+      "n_train_good": 264,
+      "valid": true
+    },
+    "hazelnut": {
+      "category_root": "C:\\Users\\Maicol\\Desktop\\Proyecto MvTec AD\\data\\raw\\mvtec_ad\\hazelnut",
+      "corrupt_files": [],
+      "defect_types": [
+        "crack",
+        "cut",
+        "hole",
+        "print"
+      ],
+      "issues": [],
+      "missing_masks": [],
+      "missing_paths": [],
+      "n_masks": 70,
+      "n_per_defect": {
+        "crack": 18,
+        "cut": 17,
+        "hole": 18,
+        "print": 17
+      },
+      "n_test": 110,
+      "n_test_defect": 70,
+      "n_test_good": 40,
+      "n_train_good": 391,
+      "valid": true
+    },
+    "leather": {
+      "category_root": "C:\\Users\\Maicol\\Desktop\\Proyecto MvTec AD\\data\\raw\\mvtec_ad\\leather",
+      "corrupt_files": [],
+      "defect_types": [
+        "color",
+        "cut",
+        "fold",
+        "glue",
+        "poke"
+      ],
+      "issues": [],
+      "missing_masks": [],
+      "missing_paths": [],
+      "n_masks": 92,
+      "n_per_defect": {
+        "color": 19,
+        "cut": 19,
+        "fold": 17,
+        "glue": 19,
+        "poke": 18
+      },
+      "n_test": 124,
+      "n_test_defect": 92,
+      "n_test_good": 32,
+      "n_train_good": 245,
+      "valid": true
+    },
+    "metal_nut": {
+      "category_root": "C:\\Users\\Maicol\\Desktop\\Proyecto MvTec AD\\data\\raw\\mvtec_ad\\metal_nut",
+      "corrupt_files": [],
+      "defect_types": [
+        "bent",
+        "color",
+        "flip",
+        "scratch"
+      ],
+      "issues": [],
+      "missing_masks": [],
+      "missing_paths": [],
+      "n_masks": 93,
+      "n_per_defect": {
+        "bent": 25,
+        "color": 22,
+        "flip": 23,
+        "scratch": 23
+      },
+      "n_test": 115,
+      "n_test_defect": 93,
+      "n_test_good": 22,
+      "n_train_good": 220,
+      "valid": true
+    },
+    "pill": {
+      "category_root": "C:\\Users\\Maicol\\Desktop\\Proyecto MvTec AD\\data\\raw\\mvtec_ad\\pill",
+      "corrupt_files": [],
+      "defect_types": [
+        "color",
+        "combined",
+        "contamination",
+        "crack",
+        "faulty_imprint",
+        "pill_type",
+        "scratch"
+      ],
+      "issues": [],
+      "missing_masks": [],
+      "missing_paths": [],
+      "n_masks": 141,
+      "n_per_defect": {
+        "color": 25,
+        "combined": 17,
+        "contamination": 21,
+        "crack": 26,
+        "faulty_imprint": 19,
+        "pill_type": 9,
+        "scratch": 24
+      },
+      "n_test": 167,
+      "n_test_defect": 141,
+      "n_test_good": 26,
+      "n_train_good": 267,
+      "valid": true
+    },
+    "screw": {
+      "category_root": "C:\\Users\\Maicol\\Desktop\\Proyecto MvTec AD\\data\\raw\\mvtec_ad\\screw",
+      "corrupt_files": [],
+      "defect_types": [
+        "manipulated_front",
+        "scratch_head",
+        "scratch_neck",
+        "thread_side",
+        "thread_top"
+      ],
+      "issues": [],
+      "missing_masks": [],
+      "missing_paths": [],
+      "n_masks": 119,
+      "n_per_defect": {
+        "manipulated_front": 24,
+        "scratch_head": 24,
+        "scratch_neck": 25,
+        "thread_side": 23,
+        "thread_top": 23
+      },
+      "n_test": 160,
+      "n_test_defect": 119,
+      "n_test_good": 41,
+      "n_train_good": 320,
+      "valid": true
+    },
+    "tile": {
+      "category_root": "C:\\Users\\Maicol\\Desktop\\Proyecto MvTec AD\\data\\raw\\mvtec_ad\\tile",
+      "corrupt_files": [],
+      "defect_types": [
+        "crack",
+        "glue_strip",
+        "gray_stroke",
+        "oil",
+        "rough"
+      ],
+      "issues": [],
+      "missing_masks": [],
+      "missing_paths": [],
+      "n_masks": 84,
+      "n_per_defect": {
+        "crack": 17,
+        "glue_strip": 18,
+        "gray_stroke": 16,
+        "oil": 18,
+        "rough": 15
+      },
+      "n_test": 117,
+      "n_test_defect": 84,
+      "n_test_good": 33,
+      "n_train_good": 230,
+      "valid": true
+    },
+    "toothbrush": {
+      "category_root": "C:\\Users\\Maicol\\Desktop\\Proyecto MvTec AD\\data\\raw\\mvtec_ad\\toothbrush",
+      "corrupt_files": [],
+      "defect_types": [
+        "defective"
+      ],
+      "issues": [],
+      "missing_masks": [],
+      "missing_paths": [],
+      "n_masks": 30,
+      "n_per_defect": {
+        "defective": 30
+      },
+      "n_test": 42,
+      "n_test_defect": 30,
+      "n_test_good": 12,
+      "n_train_good": 60,
+      "valid": true
+    },
+    "transistor": {
+      "category_root": "C:\\Users\\Maicol\\Desktop\\Proyecto MvTec AD\\data\\raw\\mvtec_ad\\transistor",
+      "corrupt_files": [],
+      "defect_types": [
+        "bent_lead",
+        "cut_lead",
+        "damaged_case",
+        "misplaced"
+      ],
+      "issues": [],
+      "missing_masks": [],
+      "missing_paths": [],
+      "n_masks": 40,
+      "n_per_defect": {
+        "bent_lead": 10,
+        "cut_lead": 10,
+        "damaged_case": 10,
+        "misplaced": 10
+      },
+      "n_test": 100,
+      "n_test_defect": 40,
+      "n_test_good": 60,
+      "n_train_good": 213,
+      "valid": true
+    },
+    "wood": {
+      "category_root": "C:\\Users\\Maicol\\Desktop\\Proyecto MvTec AD\\data\\raw\\mvtec_ad\\wood",
+      "corrupt_files": [],
+      "defect_types": [
+        "color",
+        "combined",
+        "hole",
+        "liquid",
+        "scratch"
+      ],
+      "issues": [],
+      "missing_masks": [],
+      "missing_paths": [],
+      "n_masks": 60,
+      "n_per_defect": {
+        "color": 8,
+        "combined": 11,
+        "hole": 10,
+        "liquid": 10,
+        "scratch": 21
+      },
+      "n_test": 79,
+      "n_test_defect": 60,
+      "n_test_good": 19,
+      "n_train_good": 247,
+      "valid": true
+    },
+    "zipper": {
+      "category_root": "C:\\Users\\Maicol\\Desktop\\Proyecto MvTec AD\\data\\raw\\mvtec_ad\\zipper",
+      "corrupt_files": [],
+      "defect_types": [
+        "broken_teeth",
+        "combined",
+        "fabric_border",
+        "fabric_interior",
+        "rough",
+        "split_teeth",
+        "squeezed_teeth"
+      ],
+      "issues": [],
+      "missing_masks": [],
+      "missing_paths": [],
+      "n_masks": 119,
+      "n_per_defect": {
+        "broken_teeth": 19,
+        "combined": 16,
+        "fabric_border": 17,
+        "fabric_interior": 16,
+        "rough": 17,
+        "split_teeth": 18,
+        "squeezed_teeth": 16
+      },
+      "n_test": 151,
+      "n_test_defect": 119,
+      "n_test_good": 32,
+      "n_train_good": 240,
+      "valid": true
+    }
+  },
+  "raw_dir": "C:\\Users\\Maicol\\Desktop\\Proyecto MvTec AD\\data\\raw\\mvtec_ad",
+  "timestamp": "2026-05-12T01:32:51.474890+00:00",
+  "unexpected_categories": [],
+  "valid": true
+}

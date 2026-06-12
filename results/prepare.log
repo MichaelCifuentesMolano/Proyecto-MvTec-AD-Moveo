@@ -1,0 +1,38 @@
+[2026-05-11 19:11:49] [INFO] prepare :: === MVTec AD preparation pipeline — START ===
+[2026-05-11 19:11:49] [INFO] prepare :: Setting global random seed: 42 (deterministic=True)
+[2026-05-11 19:11:49] [ERROR] prepare :: Unexpected error during preparation
+Traceback (most recent call last):
+  File "C:\Users\Maicol\Desktop\Proyecto MvTec AD\main_prepare.py", line 420, in main
+    pipeline.run()
+    ~~~~~~~~~~~~^^
+  File "C:\Users\Maicol\Desktop\Proyecto MvTec AD\main_prepare.py", line 311, in run
+    self._stage_seed()
+    ~~~~~~~~~~~~~~~~^^
+  File "C:\Users\Maicol\Desktop\Proyecto MvTec AD\main_prepare.py", line 205, in _stage_seed
+    seed_info = set_seed(seed=self.cfg.seed,
+                         deterministic=self.cfg.deterministic)
+TypeError: set_seed() got an unexpected keyword argument 'deterministic'
+[2026-05-11 19:12:19] [INFO] prepare :: === MVTec AD preparation pipeline — START ===
+[2026-05-11 19:12:19] [INFO] prepare :: Setting global random seed: 42 (deterministic=True)
+[2026-05-11 19:12:19] [INFO] prepare :: Collecting system information
+[2026-05-11 19:12:20] [INFO] prepare :: System info written to C:\Users\Maicol\Desktop\Proyecto MvTec AD\results\system_info.json
+[2026-05-11 19:12:20] [INFO] prepare :: Extracting archive C:\Users\Maicol\Desktop\Proyecto MvTec AD\mvtec_anomaly_detection.tar.xz -> C:\Users\Maicol\Desktop\Proyecto MvTec AD\data\raw
+[2026-05-11 19:16:49] [INFO] prepare :: Extraction complete: 6612 file(s), 15 categor(ies)
+[2026-05-11 19:16:49] [INFO] prepare :: Validating dataset layout under C:\Users\Maicol\Desktop\Proyecto MvTec AD\data\raw
+[2026-05-11 19:17:38] [INFO] prepare :: Validation OK — 15 categories, train=3629, test=1725, masks=1258
+[2026-05-11 19:17:38] [INFO] prepare :: Building deterministic splits (val_ratio=0.150, seed=42)
+[2026-05-11 19:17:39] [INFO] prepare :: Splits written to C:\Users\Maicol\Desktop\Proyecto MvTec AD\data\splits for 15 categor(ies)
+[2026-05-11 19:17:39] [INFO] prepare :: Dataset summary written to C:\Users\Maicol\Desktop\Proyecto MvTec AD\results\dataset_summary.json
+[2026-05-11 19:17:39] [INFO] prepare :: === Pipeline finished in 320.02 s ===
+[2026-05-11 20:32:07] [INFO] prepare :: === MVTec AD preparation pipeline — START ===
+[2026-05-11 20:32:07] [INFO] prepare :: Setting global random seed: 42 (deterministic=True)
+[2026-05-11 20:32:07] [INFO] prepare :: Collecting system information
+[2026-05-11 20:32:08] [INFO] prepare :: System info written to C:\Users\Maicol\Desktop\Proyecto MvTec AD\results\system_info.json
+[2026-05-11 20:32:08] [INFO] prepare :: Extracting archive C:\Users\Maicol\Desktop\Proyecto MvTec AD\mvtec_anomaly_detection.tar.xz -> C:\Users\Maicol\Desktop\Proyecto MvTec AD\data\raw
+[2026-05-11 20:32:08] [INFO] prepare :: Extraction complete: 6612 file(s), 15 categor(ies) [skipped — already present]
+[2026-05-11 20:32:08] [INFO] prepare :: Validating dataset layout under C:\Users\Maicol\Desktop\Proyecto MvTec AD\data\raw
+[2026-05-11 20:32:51] [INFO] prepare :: Validation OK — 15 categories, train=3629, test=1725, masks=1258
+[2026-05-11 20:32:51] [INFO] prepare :: Building deterministic splits (val_ratio=0.150, seed=42)
+[2026-05-11 20:32:52] [INFO] prepare :: Splits written to C:\Users\Maicol\Desktop\Proyecto MvTec AD\data\splits for 15 categor(ies)
+[2026-05-11 20:32:52] [INFO] prepare :: Dataset summary written to C:\Users\Maicol\Desktop\Proyecto MvTec AD\results\dataset_summary.json
+[2026-05-11 20:32:52] [INFO] prepare :: === Pipeline finished in 44.57 s ===

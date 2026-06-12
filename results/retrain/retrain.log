@@ -1,0 +1,122 @@
+[2026-05-23 17:50:10] [INFO] retrain :: === Full-budget retraining — START ===
+[2026-05-23 17:50:10] [INFO] retrain :: Config: {
+  "search_results_dir": "C:\\Users\\Maicol\\Desktop\\Proyecto MvTec AD\\results\\search",
+  "results_dir": "C:\\Users\\Maicol\\Desktop\\Proyecto MvTec AD\\results\\retrain",
+  "checkpoints_dir": "C:\\Users\\Maicol\\Desktop\\Proyecto MvTec AD\\checkpoints\\final_models",
+  "splits_dir": "C:\\Users\\Maicol\\Desktop\\Proyecto MvTec AD\\data\\splits",
+  "category": "bottle",
+  "candidates_source": "best_candidates",
+  "max_candidates": null,
+  "seed": 42,
+  "device": "cuda",
+  "n_epochs": 200,
+  "optimizer": {
+    "name": "adam",
+    "lr": 0.001,
+    "weight_decay": 1e-05
+  },
+  "scheduler": {
+    "name": "cosine",
+    "T_max": 200,
+    "eta_min": 1e-06
+  },
+  "skip_existing": true,
+  "fail_fast": false,
+  "ranking": {
+    "test_auroc": 1.0,
+    "search_latency_ms": -0.2,
+    "search_peak_ram_mb": -0.1,
+    "search_energy_mj": -0.1
+  },
+  "extra": {}
+}
+[2026-05-23 17:50:10] [INFO] retrain :: Loaded 5 candidate(s) from best_candidates
+[2026-05-23 17:50:10] [INFO] retrain :: ---- Candidate 1/5 (rank000) ----
+[2026-05-23 17:50:10] [INFO] retrain :: [rank000] building model + applying QAT wrapper
+[2026-05-23 17:54:48] [INFO] retrain :: === Full-budget retraining — START ===
+[2026-05-23 17:54:48] [INFO] retrain :: Config: {
+  "search_results_dir": "C:\\Users\\Maicol\\Desktop\\Proyecto MvTec AD\\results\\search",
+  "results_dir": "C:\\Users\\Maicol\\Desktop\\Proyecto MvTec AD\\results\\retrain",
+  "checkpoints_dir": "C:\\Users\\Maicol\\Desktop\\Proyecto MvTec AD\\checkpoints\\final_models",
+  "splits_dir": "C:\\Users\\Maicol\\Desktop\\Proyecto MvTec AD\\data\\splits",
+  "category": "bottle",
+  "candidates_source": "best_candidates",
+  "max_candidates": null,
+  "seed": 42,
+  "device": "cuda",
+  "n_epochs": 200,
+  "optimizer": {
+    "name": "adam",
+    "lr": 0.001,
+    "weight_decay": 1e-05
+  },
+  "scheduler": {
+    "name": "cosine",
+    "T_max": 200,
+    "eta_min": 1e-06
+  },
+  "skip_existing": true,
+  "fail_fast": false,
+  "ranking": {
+    "test_auroc": 1.0,
+    "search_latency_ms": -0.2,
+    "search_peak_ram_mb": -0.1,
+    "search_energy_mj": -0.1
+  },
+  "extra": {}
+}
+[2026-05-23 17:54:48] [INFO] retrain :: Loaded 5 candidate(s) from best_candidates
+[2026-05-23 17:54:48] [INFO] retrain :: ---- Candidate 1/5 (rank000) ----
+[2026-05-23 17:54:48] [INFO] retrain :: [rank000] checkpoint exists — skipping retrain
+[2026-05-23 17:54:48] [INFO] retrain :: ---- Candidate 2/5 (rank001) ----
+[2026-05-23 17:54:48] [INFO] retrain :: [rank001] building model + applying QAT wrapper
+[2026-05-23 17:55:58] [INFO] retrain :: === Full-budget retraining — START ===
+[2026-05-23 17:55:58] [INFO] retrain :: Config: {
+  "search_results_dir": "C:\\Users\\Maicol\\Desktop\\Proyecto MvTec AD\\results\\search",
+  "results_dir": "C:\\Users\\Maicol\\Desktop\\Proyecto MvTec AD\\results\\retrain",
+  "checkpoints_dir": "C:\\Users\\Maicol\\Desktop\\Proyecto MvTec AD\\checkpoints\\final_models",
+  "splits_dir": "C:\\Users\\Maicol\\Desktop\\Proyecto MvTec AD\\data\\splits",
+  "category": "bottle",
+  "candidates_source": "best_candidates",
+  "max_candidates": null,
+  "seed": 42,
+  "device": "cuda",
+  "n_epochs": 200,
+  "optimizer": {
+    "name": "adam",
+    "lr": 0.001,
+    "weight_decay": 1e-05
+  },
+  "scheduler": {
+    "name": "cosine",
+    "T_max": 200,
+    "eta_min": 1e-06
+  },
+  "skip_existing": false,
+  "fail_fast": false,
+  "ranking": {
+    "test_auroc": 1.0,
+    "search_latency_ms": -0.2,
+    "search_peak_ram_mb": -0.1,
+    "search_energy_mj": -0.1
+  },
+  "extra": {}
+}
+[2026-05-23 17:55:58] [INFO] retrain :: Loaded 5 candidate(s) from best_candidates
+[2026-05-23 17:55:58] [INFO] retrain :: ---- Candidate 1/5 (rank000) ----
+[2026-05-23 17:55:58] [INFO] retrain :: [rank000] building model + applying QAT wrapper
+[2026-05-23 18:29:16] [INFO] retrain :: [rank000] DONE — test AUROC=0.9000, val AUROC=nan, best_epoch=183, train_s=1978.4
+[2026-05-23 18:29:16] [INFO] retrain :: ---- Candidate 2/5 (rank001) ----
+[2026-05-23 18:29:16] [INFO] retrain :: [rank001] building model + applying QAT wrapper
+[2026-05-23 19:03:56] [INFO] retrain :: [rank001] DONE — test AUROC=0.9127, val AUROC=nan, best_epoch=191, train_s=2059.5
+[2026-05-23 19:03:56] [INFO] retrain :: ---- Candidate 3/5 (rank002) ----
+[2026-05-23 19:03:56] [INFO] retrain :: [rank002] building model + applying QAT wrapper
+[2026-05-23 19:37:52] [INFO] retrain :: [rank002] DONE — test AUROC=0.9095, val AUROC=nan, best_epoch=185, train_s=2016.9
+[2026-05-23 19:37:52] [INFO] retrain :: ---- Candidate 4/5 (rank003) ----
+[2026-05-23 19:37:52] [INFO] retrain :: [rank003] building model + applying QAT wrapper
+[2026-05-23 19:48:44] [INFO] retrain :: [rank003] DONE — test AUROC=0.9143, val AUROC=nan, best_epoch=48, train_s=632.1
+[2026-05-23 19:48:44] [INFO] retrain :: ---- Candidate 5/5 (rank004) ----
+[2026-05-23 19:48:44] [INFO] retrain :: [rank004] building model + applying QAT wrapper
+[2026-05-23 20:22:47] [INFO] retrain :: [rank004] DONE — test AUROC=0.9071, val AUROC=nan, best_epoch=191, train_s=2023.5
+[2026-05-23 20:22:47] [INFO] retrain :: Wrote ranking for 5 model(s) to C:\Users\Maicol\Desktop\Proyecto MvTec AD\results\retrain\model_ranked.csv
+[2026-05-23 20:22:47] [INFO] retrain :: === Retraining finished in 8809.11 s — ok=5/5 ===

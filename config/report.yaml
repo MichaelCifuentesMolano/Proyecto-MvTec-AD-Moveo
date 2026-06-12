@@ -1,0 +1,42 @@
+# config/report.yaml
+# ===================
+# Configuration for the consolidated reporting stage (main_report.py)
+
+# I/O Directories (relative to project root)
+results_root: "results"
+report_dir: "results/report"
+
+# Stage subdirectories (relative to results_root)
+search_dir: "search"
+retrain_dir: "retrain"
+deploy_dir: "deploy"
+tracking_dir: "tracking"
+
+# Output filenames (saved under report_dir)
+pareto_png: "pareto_front.png"
+convergence_png: "convergence.png"
+boxplots_png: "boxplots.png"
+latex_tex: "latex_tables.tex"
+summary_pdf: "final_summary.pdf"
+summary_json: "report_summary.json"
+
+# Document Metadata
+title: "Quantized Neural Networks for Embedded Anomaly Detection — Experimental Report"
+author: "Doctoral Research Project"
+
+# Objectives and Axes mapping
+objectives: ["neg_auroc", "latency_ms", "peak_ram_mb", "energy_mj"]
+pareto_axes: ["latency_ms", "neg_auroc"]
+convergence_metrics: ["best_neg_auroc", "median_latency_ms", "hypervolume"]
+boxplot_columns: ["latency_ms_p95", "energy_mj_per_inf", "peak_ram_mb", "on_device_auroc"]
+boxplot_group_by: "precision"
+
+# Formatting limits
+table_precision: 4
+top_k_candidates: 10
+
+# Inclusions (will skip gracefully if the directory or CSV is not found yet)
+include_search: true
+include_retrain: true
+include_deploy: true
+include_tracking: true

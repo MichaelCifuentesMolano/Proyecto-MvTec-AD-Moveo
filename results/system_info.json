@@ -1,0 +1,72 @@
+{
+  "clocks": {},
+  "collected_at": "2026-05-12T01:32:07+00:00",
+  "cpu": {
+    "base_freq_mhz": 0.0,
+    "cache": {},
+    "current_freq_mhz": 2300.0,
+    "logical_cores": 12,
+    "max_freq_mhz": 2301.0,
+    "model": "Intel64 Family 6 Model 165 Stepping 3, GenuineIntel",
+    "per_core_freq_mhz": [
+      2300.0
+    ],
+    "physical_cores": 6
+  },
+  "cuda": {
+    "cuda_available": true,
+    "cuda_home": "",
+    "cudnn_version": "90100",
+    "torch_cuda_version": "12.4"
+  },
+  "gpu": [
+    {
+      "compute_capability": "8.6",
+      "index": 0,
+      "multi_processors": 20,
+      "name": "NVIDIA GeForce RTX 3050",
+      "source": "torch.cuda",
+      "vram_total_mb": 8191.5
+    }
+  ],
+  "jetpack": {
+    "is_jetson": false
+  },
+  "os": {
+    "architecture": "64bit",
+    "hostname": "DESKTOP-SPE4SP2",
+    "machine": "AMD64",
+    "os": "Windows",
+    "python": "3.13.7",
+    "python_full": "3.13.7 (tags/v3.13.7:bcee1c3, Aug 14 2025, 14:15:11) [MSC v.1944 64 bit (AMD64)]",
+    "release": "11",
+    "version": "10.0.26100"
+  },
+  "pytorch": {
+    "backend_mkl": true,
+    "backend_mkldnn": true,
+    "backend_mps": false,
+    "backend_openmp": true,
+    "cuda_available": true,
+    "cuda_compiled": "12.4",
+    "cuda_device_count": 1,
+    "cudnn_available": true,
+    "cudnn_enabled": true,
+    "current_device": 0,
+    "current_device_name": "NVIDIA GeForce RTX 3050",
+    "debug_build": false,
+    "git_version": "2236df1770800ffea5697b11b0bb0d910b2e59e1",
+    "installed": true,
+    "version": "2.6.0+cu124"
+  },
+  "ram": {
+    "available_mb": 19601.32,
+    "percent": 40.0,
+    "swap_percent": 0.7,
+    "swap_total_mb": 8192.0,
+    "swap_used_mb": 55.4,
+    "total_mb": 32657.0,
+    "used_mb": 13055.68
+  },
+  "thermals": {}
+}

@@ -1,0 +1,55 @@
+# config/search.yaml
+# ===================
+# NSGA-II multi-objective architecture + quantization search (main_search.py).
+#
+# IMPORTANT: this file is FLAT and mirrors the SearchConfig dataclass in
+# main_search.py one-to-one. Nested keys are NOT read (they fall into
+# `extra` and are ignored). The previous nested version of this file lives
+# in config/legacy/ and was never actually loaded by the code.
+#
+# Objectives (fixed in code): neg_auroc, latency_ms, peak_ram_mb, energy_mj.
+
+# --- I/O -------------------------------------------------------------------
+splits_dir: "data/splits"
+results_dir: "results/search"
+category: "bottle"
+
+# --- Reproducibility -------------------------------------------------------
+seed: 42
+
+# --- NSGA-II hyperparameters ----------------------------------------------
+population_size: 32        # must be even
+n_generations: 30
+crossover_prob: 0.9
+mutation_prob: null        # null -> 1/genome_length (= 1/48)
+eta_c: 15.0                # UNUSED: the integer-genome engine uses
+eta_m: 20.0                # single-point crossover + random-reset mutation
+
+# Hypervolume reference point [neg_auroc, latency_ms, peak_ram_mb, energy_mj].
+# Must be WORSE than every feasible measurement (otherwise valid points add
+# zero HV — this silently happened in the pilot run). Penalised evaluations
+# (9999/65536) fall outside on purpose. Calibrate after gen 1 with
+# results/search/evaluations.csv.
+hv_reference: [0.0, 1000.0, 8192.0, 5000.0]
+
+# Engine penalty vector for failed evaluations (aligned with FitnessConfig).
+penalty_objectives: [0.0, 9999.0, 65536.0, 9999.0]
+
+# --- Search space / fitness overrides (free-form dicts) --------------------
+# Keys here are forwarded to SearchSpaceConfig / FitnessConfig downstream.
+search_space: {}
+fitness: {}
+
+# --- Compute ----------------------------------------------------------------
+device: "cuda"
+n_workers: 1
+top_k: 5                   # candidates exported to best_candidates.json
+
+# --- Resume -----------------------------------------------------------------
+# Path to latest_checkpoint (without suffix) or final_population.npz; null = fresh run.
+resume_from: null
+
+# --- Run hygiene / safety ---------------------------------------------------
+keep_old: false            # true -> do NOT delete outputs from a previous run
+allow_noop_energy: false   # true -> tolerate a missing energy backend (NOT
+                           # recommended: the energy objective degenerates)

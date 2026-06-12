@@ -1,0 +1,19 @@
+{
+  "splits_dir": "C:\\Users\\Maicol\\Desktop\\Proyecto MvTec AD\\data\\splits",
+  "results_dir": "C:\\Users\\Maicol\\Desktop\\Proyecto MvTec AD\\results\\search",
+  "category": "bottle",
+  "seed": 42,
+  "population_size": 32,
+  "n_generations": 30,
+  "crossover_prob": 0.9,
+  "mutation_prob": null,
+  "eta_c": 15.0,
+  "eta_m": 20.0,
+  "search_space": {},
+  "fitness": {},
+  "device": "cuda",
+  "n_workers": 1,
+  "top_k": 5,
+  "resume_from": "results\\search\\latest_checkpoint.npz",
+  "extra": {}
+}

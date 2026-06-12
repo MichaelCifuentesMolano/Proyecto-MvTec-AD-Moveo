@@ -1,0 +1,9 @@
+{
+  "n_candidates": 5,
+  "n_ok": 5,
+  "n_failed": 0,
+  "elapsed_seconds": 8809.112,
+  "final_metrics_csv": "C:\\Users\\Maicol\\Desktop\\Proyecto MvTec AD\\results\\retrain\\final_metrics.csv",
+  "model_ranked_csv": "C:\\Users\\Maicol\\Desktop\\Proyecto MvTec AD\\results\\retrain\\model_ranked.csv",
+  "checkpoints_dir": "C:\\Users\\Maicol\\Desktop\\Proyecto MvTec AD\\checkpoints\\final_models"
+}

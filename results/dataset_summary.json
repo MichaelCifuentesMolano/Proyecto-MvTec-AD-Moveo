@@ -1,0 +1,365 @@
+{
+  "config": {
+    "archive_path": "C:\\Users\\Maicol\\Desktop\\Proyecto MvTec AD\\mvtec_anomaly_detection.tar.xz",
+    "deterministic": true,
+    "expected_categories": [
+      "bottle",
+      "cable",
+      "capsule",
+      "carpet",
+      "grid",
+      "hazelnut",
+      "leather",
+      "metal_nut",
+      "pill",
+      "screw",
+      "tile",
+      "toothbrush",
+      "transistor",
+      "wood",
+      "zipper"
+    ],
+    "extra": {},
+    "force": false,
+    "processed_dir": "C:\\Users\\Maicol\\Desktop\\Proyecto MvTec AD\\data\\processed",
+    "raw_dir": "C:\\Users\\Maicol\\Desktop\\Proyecto MvTec AD\\data\\raw",
+    "results_dir": "C:\\Users\\Maicol\\Desktop\\Proyecto MvTec AD\\results",
+    "seed": 42,
+    "skip_processed": false,
+    "splits_dir": "C:\\Users\\Maicol\\Desktop\\Proyecto MvTec AD\\data\\splits",
+    "stratify_by_defect": true,
+    "val_ratio": 0.15
+  },
+  "elapsed_seconds": 44.571,
+  "extract": {
+    "categories": [
+      "bottle",
+      "cable",
+      "capsule",
+      "carpet",
+      "grid",
+      "hazelnut",
+      "leather",
+      "metal_nut",
+      "pill",
+      "screw",
+      "tile",
+      "toothbrush",
+      "transistor",
+      "wood",
+      "zipper"
+    ],
+    "n_files_extracted": 6612,
+    "raw_root": "C:\\Users\\Maicol\\Desktop\\Proyecto MvTec AD\\data\\raw\\mvtec_ad",
+    "skipped": true
+  },
+  "splits": {
+    "per_category": {
+      "_cross_category": {
+        "all_categories": {
+          "manifest": "_cross_category/all_categories.json",
+          "per_category": {
+            "bottle": {
+              "test": 83,
+              "train": 178,
+              "val": 31
+            },
+            "cable": {
+              "test": 150,
+              "train": 190,
+              "val": 34
+            },
+            "capsule": {
+              "test": 132,
+              "train": 186,
+              "val": 33
+            },
+            "carpet": {
+              "test": 117,
+              "train": 238,
+              "val": 42
+            },
+            "grid": {
+              "test": 78,
+              "train": 224,
+              "val": 40
+            },
+            "hazelnut": {
+              "test": 110,
+              "train": 332,
+              "val": 59
+            },
+            "leather": {
+              "test": 124,
+              "train": 208,
+              "val": 37
+            },
+            "metal_nut": {
+              "test": 115,
+              "train": 187,
+              "val": 33
+            },
+            "pill": {
+              "test": 167,
+              "train": 227,
+              "val": 40
+            },
+            "screw": {
+              "test": 160,
+              "train": 272,
+              "val": 48
+            },
+            "tile": {
+              "test": 117,
+              "train": 196,
+              "val": 34
+            },
+            "toothbrush": {
+              "test": 42,
+              "train": 51,
+              "val": 9
+            },
+            "transistor": {
+              "test": 100,
+              "train": 181,
+              "val": 32
+            },
+            "wood": {
+              "test": 79,
+              "train": 210,
+              "val": 37
+            },
+            "zipper": {
+              "test": 151,
+              "train": 204,
+              "val": 36
+            }
+          },
+          "test": 1725,
+          "train": 3084,
+          "val": 545
+        },
+        "leave_one_out": {
+          "bottle": {
+            "manifest": "_cross_category/leave_one_out_bottle.json",
+            "test": 83,
+            "train": 2906,
+            "val": 514
+          },
+          "cable": {
+            "manifest": "_cross_category/leave_one_out_cable.json",
+            "test": 150,
+            "train": 2894,
+            "val": 511
+          },
+          "capsule": {
+            "manifest": "_cross_category/leave_one_out_capsule.json",
+            "test": 132,
+            "train": 2898,
+            "val": 512
+          },
+          "carpet": {
+            "manifest": "_cross_category/leave_one_out_carpet.json",
+            "test": 117,
+            "train": 2846,
+            "val": 503
+          },
+          "grid": {
+            "manifest": "_cross_category/leave_one_out_grid.json",
+            "test": 78,
+            "train": 2860,
+            "val": 505
+          },
+          "hazelnut": {
+            "manifest": "_cross_category/leave_one_out_hazelnut.json",
+            "test": 110,
+            "train": 2752,
+            "val": 486
+          },
+          "leather": {
+            "manifest": "_cross_category/leave_one_out_leather.json",
+            "test": 124,
+            "train": 2876,
+            "val": 508
+          },
+          "metal_nut": {
+            "manifest": "_cross_category/leave_one_out_metal_nut.json",
+            "test": 115,
+            "train": 2897,
+            "val": 512
+          },
+          "pill": {
+            "manifest": "_cross_category/leave_one_out_pill.json",
+            "test": 167,
+            "train": 2857,
+            "val": 505
+          },
+          "screw": {
+            "manifest": "_cross_category/leave_one_out_screw.json",
+            "test": 160,
+            "train": 2812,
+            "val": 497
+          },
+          "tile": {
+            "manifest": "_cross_category/leave_one_out_tile.json",
+            "test": 117,
+            "train": 2888,
+            "val": 511
+          },
+          "toothbrush": {
+            "manifest": "_cross_category/leave_one_out_toothbrush.json",
+            "test": 42,
+            "train": 3033,
+            "val": 536
+          },
+          "transistor": {
+            "manifest": "_cross_category/leave_one_out_transistor.json",
+            "test": 100,
+            "train": 2903,
+            "val": 513
+          },
+          "wood": {
+            "manifest": "_cross_category/leave_one_out_wood.json",
+            "test": 79,
+            "train": 2874,
+            "val": 508
+          },
+          "zipper": {
+            "manifest": "_cross_category/leave_one_out_zipper.json",
+            "test": 151,
+            "train": 2880,
+            "val": 509
+          }
+        }
+      },
+      "bottle": {
+        "manifest": "bottle.json",
+        "test": 83,
+        "test_defect": 63,
+        "test_good": 20,
+        "train": 178,
+        "val": 31
+      },
+      "cable": {
+        "manifest": "cable.json",
+        "test": 150,
+        "test_defect": 92,
+        "test_good": 58,
+        "train": 190,
+        "val": 34
+      },
+      "capsule": {
+        "manifest": "capsule.json",
+        "test": 132,
+        "test_defect": 109,
+        "test_good": 23,
+        "train": 186,
+        "val": 33
+      },
+      "carpet": {
+        "manifest": "carpet.json",
+        "test": 117,
+        "test_defect": 89,
+        "test_good": 28,
+        "train": 238,
+        "val": 42
+      },
+      "grid": {
+        "manifest": "grid.json",
+        "test": 78,
+        "test_defect": 57,
+        "test_good": 21,
+        "train": 224,
+        "val": 40
+      },
+      "hazelnut": {
+        "manifest": "hazelnut.json",
+        "test": 110,
+        "test_defect": 70,
+        "test_good": 40,
+        "train": 332,
+        "val": 59
+      },
+      "leather": {
+        "manifest": "leather.json",
+        "test": 124,
+        "test_defect": 92,
+        "test_good": 32,
+        "train": 208,
+        "val": 37
+      },
+      "metal_nut": {
+        "manifest": "metal_nut.json",
+        "test": 115,
+        "test_defect": 93,
+        "test_good": 22,
+        "train": 187,
+        "val": 33
+      },
+      "pill": {
+        "manifest": "pill.json",
+        "test": 167,
+        "test_defect": 141,
+        "test_good": 26,
+        "train": 227,
+        "val": 40
+      },
+      "screw": {
+        "manifest": "screw.json",
+        "test": 160,
+        "test_defect": 119,
+        "test_good": 41,
+        "train": 272,
+        "val": 48
+      },
+      "tile": {
+        "manifest": "tile.json",
+        "test": 117,
+        "test_defect": 84,
+        "test_good": 33,
+        "train": 196,
+        "val": 34
+      },
+      "toothbrush": {
+        "manifest": "toothbrush.json",
+        "test": 42,
+        "test_defect": 30,
+        "test_good": 12,
+        "train": 51,
+        "val": 9
+      },
+      "transistor": {
+        "manifest": "transistor.json",
+        "test": 100,
+        "test_defect": 40,
+        "test_good": 60,
+        "train": 181,
+        "val": 32
+      },
+      "wood": {
+        "manifest": "wood.json",
+        "test": 79,
+        "test_defect": 60,
+        "test_good": 19,
+        "train": 210,
+        "val": 37
+      },
+      "zipper": {
+        "manifest": "zipper.json",
+        "test": 151,
+        "test_defect": 119,
+        "test_good": 32,
+        "train": 204,
+        "val": 36
+      }
+    },
+    "splits_dir": "C:\\Users\\Maicol\\Desktop\\Proyecto MvTec AD\\data\\splits"
+  },
+  "validation": {
+    "issues": [],
+    "n_masks": 1258,
+    "n_test": 1725,
+    "n_train": 3629,
+    "valid": true
+  }
+}

@@ -1,0 +1,205 @@
+# config/tracking.yaml
+# =====================
+# Camera acquisition, multi-object tracker, and closed-loop control settings.
+#
+# Three coupled sub-systems are configured here:
+#   1. camera   — sensor source, resolution, FPS, GStreamer pipeline.
+#   2. tracker  — algorithm, lifecycle thresholds, association parameters.
+#   3. control  — PID gains, alarm thresholds, mobile-base limits.
+#
+# All normalised velocity fields are in [-1, +1].
+# Physical scaling (deg/s, m/s) is done inside the publisher / servo driver.
+
+# ─────────────────────────────────────────────────────────────────────────
+# Camera / sensor
+# ─────────────────────────────────────────────────────────────────────────
+camera:
+  # Source type: usb | csi | realsense | video_file | mock
+  source: csi
+
+  # ── Frame geometry ───────────────────────────────────────────────────
+  width:  640
+  height: 480
+  fps:    30
+
+  # ── CSI (Jetson nvarguscamerasrc) ────────────────────────────────────
+  csi:
+    sensor_id:   0              # Physical CSI port (0 or 1 on Orin Nano).
+    flip_method: 0              # 0=none, 2=180°, 6=90°CW; see nvarguscamerasrc docs.
+
+  # ── USB camera ───────────────────────────────────────────────────────
+  usb:
+    device_id: 0               # /dev/video<id>
+
+  # ── RealSense (D435/D455) ─────────────────────────────────────────────
+  realsense:
+    color_format: bgr8
+    depth:        false         # Enable depth stream for distance estimation.
+
+  # ── Video file ────────────────────────────────────────────────────────
+  video_file:
+    path: null                  # Set to a file path when source=video_file.
+    loop: false
+
+  # ── Mock (testing without hardware) ──────────────────────────────────
+  mock:
+    width:  640
+    height: 480
+    fps:    30
+    pattern: moving_square      # moving_square | noise | solid
+
+  # ── Ring-buffer settings ──────────────────────────────────────────────
+  buffer_size:       4          # Frames kept in the ring buffer.
+  reconnect_delay_s: 1.0
+  max_reconnects:    5
+
+# ─────────────────────────────────────────────────────────────────────────
+# Detector (anomaly inference)
+# ─────────────────────────────────────────────────────────────────────────
+detector:
+  # Backend: trt | torch | onnx
+  backend: trt
+
+  # Engine / model path (relative to project root).
+  model_path: models/trt_engines/model_int8.engine
+
+  # Score normalisation range (raw scores are clipped then rescaled to [0,1]).
+  score_min: 0.0
+  score_max: 1.0
+
+  # Anomaly threshold: scores above this → anomaly = True.
+  score_threshold: 0.50
+
+  # Heatmap post-processing.
+  heatmap_blur_sigma: 2.0       # Gaussian blur σ (pixels); 0 to disable.
+  upsample_mode:      bilinear  # bilinear | nearest | bicubic
+  overlay_alpha:      0.45      # Heatmap blend weight on the BGR frame.
+  colormap:           2         # cv2 colormap id: 2 = COLORMAP_JET.
+
+  # ROI extraction from heatmap.
+  roi_threshold:       0.40     # Normalised heatmap value to binarise.
+  roi_min_area_frac:   0.005    # Minimum ROI area as fraction of frame area.
+  max_rois:            10       # Maximum ROIs returned per frame.
+
+  # Severity labels (thresholds on normalised heatmap peak score).
+  severity_thresholds: [0.40, 0.70]
+  # ≤ 0.40 → normal | 0.40–0.70 → warning | > 0.70 → critical
+
+  # Half precision inference (FP16 for Torch/ONNX backends).
+  half_precision: false
+
+# ─────────────────────────────────────────────────────────────────────────
+# Multi-object tracker
+# ─────────────────────────────────────────────────────────────────────────
+tracker:
+  # Algorithm: sort | lightweight | csrt | kcf
+  algorithm: sort
+
+  # ── Track lifecycle ───────────────────────────────────────────────────
+  min_hits_to_confirm:     3    # Consecutive detections to promote TENTATIVE → CONFIRMED.
+  max_misses_before_lost:  5    # Consecutive misses before CONFIRMED → LOST.
+  max_misses_before_delete: 10  # Consecutive misses before LOST → DELETED.
+
+  # ── Detection-to-track association ────────────────────────────────────
+  iou_threshold:        0.30    # Minimum IoU for a valid detection↔track match.
+  anomaly_score_weight: 0.20    # Affinity bonus: IoU += weight × anomaly_score.
+
+  # ── Kalman filter (SORT) ──────────────────────────────────────────────
+  process_noise_scale:     1.0
+  measurement_noise_scale: 1.0
+
+  # ── Filtering ─────────────────────────────────────────────────────────
+  min_bbox_area_px: 100.0       # Detections smaller than this are discarded.
+
+  # ── History ───────────────────────────────────────────────────────────
+  max_history_len: 30           # Bounding-box history frames retained per track.
+
+# ─────────────────────────────────────────────────────────────────────────
+# Closed-loop control
+# ─────────────────────────────────────────────────────────────────────────
+control:
+  # ── Target selection ──────────────────────────────────────────────────
+  follow_min_score:    0.30     # Minimum anomaly score to start following.
+  follow_confirmed_only: true   # Only follow CONFIRMED (not TENTATIVE) tracks.
+  target_sticky_frames: 10      # Frames to stay on a chosen track before switching.
+
+  # ── PID control (pan / tilt camera gimbal) ────────────────────────────
+  pid:
+    kp: 1.20                    # Proportional gain.
+    ki: 0.05                    # Integral gain (anti-windup applied).
+    kd: 0.10                    # Derivative gain.
+    output_limit:    1.0        # Output clamp ±1.0 = full velocity.
+    integral_limit:  0.50       # Anti-windup saturation.
+
+  # ── Camera recentering ────────────────────────────────────────────────
+  recenter:
+    kp: 0.80                    # Proportional gain for return-to-centre.
+    dead_zone_deg: 1.0          # Estimated angle (°) below which camera is centred.
+    velocity_to_angle_deg: 5.0  # Degrees per velocity unit per frame (tune per gimbal).
+
+  # ── Alarm ─────────────────────────────────────────────────────────────
+  alarm:
+    score_threshold:    0.75    # Global or peak score that triggers ALARMING.
+    severity_label:     critical  # ROI severity that always triggers alarm.
+    persist_frames:     30      # Hold alarm output for N frames after last trigger.
+    freeze_tracking:    false   # If true, suppress pan/tilt while alarming.
+
+  # ── Mobile base (disabled by default) ────────────────────────────────
+  base:
+    enabled:              false
+    target_bbox_height_px: 150.0  # Desired target height in pixels (distance proxy).
+    kp_linear:            0.50
+    kp_angular:           0.80
+    max_linear_velocity:  0.30    # m/s
+    max_angular_velocity: 1.00    # rad/s
+
+  # ── Loop timing ───────────────────────────────────────────────────────
+  target_fps: 30.0              # Desired control loop frequency.
+  log_every_n_frames: 30        # Emit INFO log every N frames.
+
+# ─────────────────────────────────────────────────────────────────────────
+# Command publisher
+# ─────────────────────────────────────────────────────────────────────────
+publisher:
+  # Backend: mock | serial | callback
+  backend: mock
+
+  serial:
+    port:    /dev/ttyUSB0
+    baud:    115200
+    timeout: 1.0               # Serial read timeout (seconds).
+
+# ─────────────────────────────────────────────────────────────────────────
+# Robustness test defaults
+# ─────────────────────────────────────────────────────────────────────────
+robustness:
+  n_frames:       150
+  seed:           42
+  tracker_algorithm: sort
+
+  # Mock detector noise.
+  detection_jitter_px: 5.0
+  base_miss_rate:      0.05
+  anomaly_score:       0.85
+
+  # Pass thresholds.
+  min_detection_rate:         0.75
+  min_track_persistence:      0.65
+  max_id_switches:            5
+  max_reacquisition_latency:  15
+
+  # Motion blur.
+  blur_kernel_sizes:   [5, 11, 15, 21, 31]
+  blur_pass_max_kernel: 21
+
+  # Occlusion.
+  occlusion_start_frame:    40
+  occlusion_duration_frames: 30
+  occlusion_coverage:       0.90
+
+  # Dropped frames.
+  regular_drop_every:  5
+  burst_drop_start:   60
+  burst_drop_length:  12
+
+  output_dir: results/robustness

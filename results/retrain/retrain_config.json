@@ -1,0 +1,31 @@
+{
+  "search_results_dir": "C:\\Users\\Maicol\\Desktop\\Proyecto MvTec AD\\results\\search",
+  "results_dir": "C:\\Users\\Maicol\\Desktop\\Proyecto MvTec AD\\results\\retrain",
+  "checkpoints_dir": "C:\\Users\\Maicol\\Desktop\\Proyecto MvTec AD\\checkpoints\\final_models",
+  "splits_dir": "C:\\Users\\Maicol\\Desktop\\Proyecto MvTec AD\\data\\splits",
+  "category": "bottle",
+  "candidates_source": "best_candidates",
+  "max_candidates": null,
+  "seed": 42,
+  "device": "cuda",
+  "n_epochs": 200,
+  "optimizer": {
+    "name": "adam",
+    "lr": 0.001,
+    "weight_decay": 1e-05
+  },
+  "scheduler": {
+    "name": "cosine",
+    "T_max": 200,
+    "eta_min": 1e-06
+  },
+  "skip_existing": false,
+  "fail_fast": false,
+  "ranking": {
+    "test_auroc": 1.0,
+    "search_latency_ms": -0.2,
+    "search_peak_ram_mb": -0.1,
+    "search_energy_mj": -0.1
+  },
+  "extra": {}
+}
