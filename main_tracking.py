@@ -148,7 +148,7 @@ from src.profiling.energy_meter import EnergyMeter
 # Constants
 # ---------------------------------------------------------------------------
 PROJECT_ROOT: Path = Path(__file__).resolve().parent
-DEFAULT_CONFIG: Path = PROJECT_ROOT / "config" / "tracking.yaml"
+DEFAULT_CONFIG: Path = PROJECT_ROOT / "configs" / "tracking.yaml"
 DEFAULT_DEPLOY_RESULTS: Path = PROJECT_ROOT / "results" / "deploy"
 DEFAULT_RESULTS_DIR: Path = PROJECT_ROOT / "results" / "tracking"
 DEFAULT_VIDEO_DIR: Path = DEFAULT_RESULTS_DIR / "video_logs"
@@ -997,9 +997,6 @@ def _build_argparser() -> argparse.ArgumentParser:
     p.add_argument("--device", type=str, default=None,
                    choices=[None, "cpu", "cuda"])
     p.add_argument("--fail-fast", action="store_true")
-    p.add_argument("--keep-old", action="store_true",
-                   help="Do NOT delete metrics/videos from a previous "
-                        "tracking run.")
     p.add_argument("--quiet", action="store_true")
     return p
 
@@ -1040,41 +1037,10 @@ def _apply_cli_overrides(cfg: TrackingConfig,
     return cfg
 
 
-def _clean_previous_outputs(cfg: TrackingConfig,
-                            logger: logging.Logger) -> int:
-    """Delete metrics and recorded videos from a previous tracking run.
-
-    Sessions from different runs must not be appended to the same CSVs.
-    Log files are not removed (the logger keeps an open handle).
-    """
-    n_removed = 0
-    stale: list[Path] = [
-        cfg.results_dir / "tracking_metrics.csv",
-        cfg.results_dir / "failure_cases.csv",
-        cfg.results_dir / "tracking_summary.json",
-        cfg.results_dir / "tracking_config.json",
-    ]
-    if cfg.video_dir.is_dir():
-        stale += sorted(cfg.video_dir.glob("*.mp4"))
-        stale += sorted(cfg.video_dir.glob("*.avi"))
-    for f in stale:
-        try:
-            if f.is_file():
-                f.unlink()
-                n_removed += 1
-        except OSError as exc:
-            logger.warning("Could not remove stale file %s: %s", f, exc)
-    if n_removed:
-        logger.info("Cleanup: removed %d stale artifact(s) from previous "
-                    "tracking run (use --keep-old to disable).", n_removed)
-    return n_removed
-
-
 def main(argv: list[str] | None = None) -> int:
     args = _build_argparser().parse_args(argv)
-    config_found = args.config.is_file()
     cfg = (TrackingConfig.from_file(args.config)
-           if config_found else TrackingConfig())
+           if args.config.is_file() else TrackingConfig())
     cfg = _apply_cli_overrides(cfg, args)
 
     log_path = cfg.results_dir / "tracking.log"
@@ -1082,17 +1048,6 @@ def main(argv: list[str] | None = None) -> int:
         log_path=log_path,
         level=logging.WARNING if args.quiet else logging.INFO,
     )
-    if not config_found:
-        logger.warning(
-            "Config file %s NOT found — running with built-in defaults. "
-            "Pass --config or create the file to control the run.",
-            args.config,
-        )
-
-    if args.keep_old:
-        logger.info("Cleanup skipped: --keep-old requested.")
-    else:
-        _clean_previous_outputs(cfg, logger)
 
     if cfg.record_video and not _HAVE_CV2:
         logger.warning(

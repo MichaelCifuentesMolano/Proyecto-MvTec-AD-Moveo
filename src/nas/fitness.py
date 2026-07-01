@@ -93,9 +93,6 @@ _measure_peak_ram  = _try_import("src.profiling.ram_meter",     "measure_peak_ra
 _measure_energy    = _try_import("src.profiling.energy_meter",  "measure_energy")
 _estimate_complexity = _try_import("src.nas.encoding",          "estimate_complexity")
 
-# One-time flag: avoid spamming the log when the energy backend is absent.
-_ENERGY_NOOP_WARNED: bool = False
-
 
 # ---------------------------------------------------------------------------
 # Penalty reasons
@@ -142,17 +139,15 @@ class FitnessConfig:
     search_weight_decay:     float      = 1e-4
     grad_clip_norm:          float      = 1.0
     qat_calibration_batches: int        = 5      # batches for fake-quant calibration
-    # Semilla del entrenamiento proxy. Es LA MISMA para todos los
-    # candidatos de una corrida (comparación justa: ningún candidato gana
-    # por una inicialización afortunada) y main_search la deriva de
-    # SearchConfig.seed, de modo que corridas con semillas distintas son
-    # independientes también en pesos iniciales y shuffle de datos.
-    train_seed:              int        = 0
 
     # ---- Hardware profiling ----
     n_profiling_warmup:      int        = 10
     n_profiling_iters:       int        = 30
     profiling_amp:           bool       = False
+    # Energy backend: "auto" | "tegrastats" | "sysfs" | "nvml" | "noop".
+    # On a desktop PC with an NVIDIA GPU use "nvml" (requires pynvml);
+    # on Jetson, "auto" resolves to tegrastats/sysfs.
+    energy_backend:          str        = "auto"
 
     # ---- Normalisation reference points ----
     # best (ideal) / worst (normalisation floor) for each objective
@@ -185,7 +180,6 @@ class FitnessConfig:
     # ---- Timeouts ----
     train_timeout_seconds:   float | None = 600.0
     profile_timeout_seconds: float | None = 120.0
-    eval_timeout_seconds:    float | None = 300.0   # etapa AUROC (antes sin límite)
 
     def to_dict(self) -> dict[str, Any]:
         d = asdict(self)
@@ -224,12 +218,6 @@ class FitnessResult:
     # Profiling diagnostics
     profiling_ok:     bool         = True
 
-    # True si esta evaluación corrió mientras un hilo zombi de un timeout
-    # anterior podía seguir ejecutando kernels en la GPU: latencia/energía
-    # potencialmente contaminadas. Permite excluir o re-evaluar estos
-    # puntos en el análisis (columna en evaluations.csv).
-    gpu_tainted:      bool         = False
-
     # Timing
     elapsed_seconds:  float        = 0.0
 
@@ -262,7 +250,6 @@ class FitnessResult:
             "n_epochs_trained": self.n_epochs_trained,
             "stopped_early":  self.stopped_early,
             "profiling_ok":   self.profiling_ok,
-            "gpu_tainted":    self.gpu_tainted,
             "elapsed_seconds": self.elapsed_seconds,
             "error_message":  self.error_message,
         }
@@ -361,13 +348,6 @@ class FitnessEvaluator:
         self._callbacks  = extra_callbacks or []
         self._n_calls    = 0
         self._n_failures = 0
-        # Cuarentena de GPU tras un timeout: el hilo daemon que excedió el
-        # límite NO puede matarse y puede seguir lanzando kernels durante
-        # un tiempo, contaminando latencia/energía de las evaluaciones
-        # siguientes. Las evaluaciones dentro de la ventana se marcan con
-        # gpu_tainted=True en lugar de fingir que sus medidas son limpias.
-        self._gpu_tainted_until: float = 0.0
-        self._taint_window_s:    float = 120.0
 
     # ------------------------------------------------------------------
     # NSGA-II-compatible entry point
@@ -402,13 +382,11 @@ class FitnessEvaluator:
         """
         self._n_calls += 1
         t_start = time.perf_counter()
-        tainted = time.time() < self._gpu_tainted_until
 
         # ---- 1. Build model ----
         model, reason, err = self._build_and_wrap(candidate_dict)
         if model is None:
-            return self._penalise(reason, err, time.perf_counter() - t_start,
-                                  candidate_dict, tainted)
+            return self._penalise(reason, err, time.perf_counter() - t_start)
 
         # ---- 2. Check hard constraints ----
         violation = self._check_constraints(candidate_dict)
@@ -417,30 +395,20 @@ class FitnessEvaluator:
                 PenaltyReason.CONSTRAINT_VIOLATED,
                 violation,
                 time.perf_counter() - t_start,
-                candidate_dict, tainted,
             )
 
         # ---- 3. Quick training + QAT calibration ----
         train_info, reason, err = self._quick_train(model, candidate_dict)
         if reason not in (PenaltyReason.NONE, None):
-            if reason == PenaltyReason.TRAINING_TIMEOUT:
-                self._mark_gpu_tainted("training timeout")
-            return self._penalise(reason, err, time.perf_counter() - t_start,
-                                  candidate_dict, tainted)
+            return self._penalise(reason, err, time.perf_counter() - t_start)
 
         # ---- 4. AUROC evaluation ----
         auroc, reason, err = self._evaluate_auroc(model, candidate_dict)
         if reason not in (PenaltyReason.NONE, None):
-            if "timed out" in (err or "").lower() or "timeout" in (err or "").lower():
-                self._mark_gpu_tainted("AUROC eval timeout")
-            return self._penalise(reason, err, time.perf_counter() - t_start,
-                                  candidate_dict, tainted)
+            return self._penalise(reason, err, time.perf_counter() - t_start)
 
         # ---- 5. Hardware profiling ----
         hw, hw_ok, hw_err = self._profile_hardware(model, candidate_dict)
-        if not hw_ok and ("timed out" in (hw_err or "").lower()
-                          or "timeout" in (hw_err or "").lower()):
-            self._mark_gpu_tainted("profiling timeout")
 
         # ---- 6. Assemble result ----
         latency_ms  = hw.get("latency_ms",  self._cfg.penalty_latency_ms)
@@ -460,7 +428,6 @@ class FitnessEvaluator:
             energy_norm   = norms["energy_norm"],
             penalty_reason  = PenaltyReason.PROFILING_FAILED if not hw_ok else PenaltyReason.NONE,
             penalty_applied = not hw_ok,
-            gpu_tainted     = tainted,
             train_loss        = train_info.get("best_val", {}).get("loss") if isinstance(train_info.get("best_val"), dict) else (train_info.get("best_val") if train_info else None),
             n_epochs_trained  = train_info.get("n_epochs_trained", 0) if train_info else 0,
             stopped_early     = train_info.get("stopped_early", False) if train_info else False,
@@ -583,7 +550,7 @@ class FitnessEvaluator:
             optimizer_cfg = optimizer_cfg,
             scheduler_cfg = scheduler_cfg,
             device        = cfg.device,
-            seed          = cfg.train_seed,
+            seed          = 0,
             checkpoint_path = None,
             log_dir       = None,
             # Pass extra options to limit data when supported
@@ -675,28 +642,19 @@ class FitnessEvaluator:
 
         cfg = self._cfg
         try:
-            def _run_eval():
-                return _eval_from_splits(
-                    model      = model,
-                    splits_dir = Path(cfg.splits_dir),
-                    category   = cfg.category,
-                    device     = cfg.device,
-                    split      = cfg.eval_split,
-                    batch_size = cfg.search_batch_size * 2,
-                    num_workers= 0,
-                    amp        = cfg.amp,
-                    image_size = int(candidate_dict.get("arch_spec", {}).get("input_size", 224)),
-                )
-            # Antes esta etapa NO tenía límite: un dataloader/forward
-            # colgado congelaba la búsqueda completa de forma indefinida.
-            result = (
-                _run_with_timeout(_run_eval, cfg.eval_timeout_seconds)
-                if cfg.eval_timeout_seconds else _run_eval()
+            result = _eval_from_splits(
+                model      = model,
+                splits_dir = Path(cfg.splits_dir),
+                category   = cfg.category,
+                device     = cfg.device,
+                split      = cfg.eval_split,
+                batch_size = cfg.search_batch_size * 2,
+                num_workers= 0,
+                amp        = cfg.amp,
+                image_size = int(candidate_dict.get("arch_spec", {}).get("input_size", 224)),
             )
             auroc = float(result.get("auroc") or 0.0)
             return auroc, PenaltyReason.NONE, ""
-        except TimeoutError as exc:
-            return 0.0, PenaltyReason.EVAL_FAILED, f"AUROC eval timed out: {exc}"
         except torch.cuda.OutOfMemoryError as exc:
             torch.cuda.empty_cache()
             return 0.0, PenaltyReason.OOM, str(exc)
@@ -763,25 +721,7 @@ class FitnessEvaluator:
                     _run_with_timeout(_ram, cfg.profile_timeout_seconds)
                     if cfg.profile_timeout_seconds else _ram()
                 )
-                # Model-attributable memory, not the absolute process RSS.
-                # The absolute RSS (~1.8 GB on a workstation) is dominated
-                # by the Python/CUDA runtime and is nearly constant across
-                # candidates, which degenerates the RAM objective. Prefer:
-                #   1. device_peak_mb  (torch.cuda.max_memory_allocated)
-                #   2. host RSS growth (host_peak_mb - host_baseline_mb)
-                #   3. legacy absolute peak_ram_mb as a last resort
-                dev_peak  = ram_result.get("device_peak_mb")
-                host_peak = ram_result.get("host_peak_mb")
-                host_base = ram_result.get("host_baseline_mb")
-                host_delta = (
-                    host_peak - host_base
-                    if (host_peak is not None and host_base is not None)
-                    else None
-                )
-                attributable = [v for v in (dev_peak, host_delta)
-                                if v is not None and v > 0]
-                r_val = (max(attributable) if attributable
-                         else ram_result.get("peak_ram_mb"))
+                r_val = ram_result.get("peak_ram_mb")
                 hw["peak_ram_mb"] = float(r_val) if r_val is not None else cfg.penalty_ram_mb
             except Exception as exc:  # noqa: BLE001
                 hw["peak_ram_mb"] = cfg.penalty_ram_mb
@@ -801,30 +741,22 @@ class FitnessEvaluator:
                         n_warmup=cfg.n_profiling_warmup,
                         n_iters=cfg.n_profiling_iters,
                         fp16=cfg.profiling_amp,
+                        backend=cfg.energy_backend,
                     )
                 eng_result = (
                     _run_with_timeout(_eng, cfg.profile_timeout_seconds)
                     if cfg.profile_timeout_seconds else _eng()
                 )
                 e_val = eng_result.get("active_energy_mj_per_inf") or eng_result.get("energy_mj_per_inf")
-                e_source = str(eng_result.get("source", "unknown"))
-                if e_source == "noop" or e_val is None:
-                    # A 'noop' backend silently degenerates the energy
-                    # objective into a constant penalty (the energy_mj=9999
-                    # bug). Treat it as a failed measurement and warn once.
-                    global _ENERGY_NOOP_WARNED
-                    if not _ENERGY_NOOP_WARNED:
-                        LOG.error(
-                            "Energy meter backend is '%s' (no NVML/tegrastats"
-                            " available) — energy_mj falls back to the "
-                            "penalty value %.0f for ALL candidates. Install "
-                            "'nvidia-ml-py' on PC or run on Jetson.",
-                            e_source, cfg.penalty_energy_mj,
-                        )
-                        _ENERGY_NOOP_WARNED = True
-                    hw["energy_mj"] = cfg.penalty_energy_mj
+                if e_val is None:
+                    # Do not hide a dead measurement channel behind a silent
+                    # penalty: flag it so the individual is marked and the
+                    # search summary can report the objective as inoperative.
                     ok = False
-                    err += f" energy: backend '{e_source}' unavailable"
+                    err += (f" energy: backend {cfg.energy_backend!r} returned"
+                            " no measurement (install pynvml for NVML on PC"
+                            " or run on Jetson for tegrastats/sysfs)")
+                    hw["energy_mj"] = cfg.penalty_energy_mj
                 else:
                     hw["energy_mj"] = float(e_val)
             except Exception as exc:  # noqa: BLE001
@@ -850,31 +782,10 @@ class FitnessEvaluator:
     # Penalty factory
     # ------------------------------------------------------------------
 
-    def _mark_gpu_tainted(self, why: str) -> None:
-        """Open the GPU-quarantine window after a timeout.
-
-        LIMITACIÓN DOCUMENTADA: el timeout se implementa con un hilo daemon
-        (no matable en Python). Un cuelgue real de CUDA puede sobrevivir al
-        timeout y seguir ejecutando kernels; aislar cada evaluación en un
-        subproceso matable sería la solución completa pero implica
-        re-crear el contexto CUDA y transferir el modelo por evaluación
-        (cambio grande, no seguro de hacer a ciegas). Mitigación adoptada:
-        ventana de cuarentena + marca gpu_tainted en cada resultado para
-        poder excluir/re-evaluar esos puntos en el análisis.
-        """
-        self._gpu_tainted_until = time.time() + self._taint_window_s
-        LOG.warning(
-            "GPU en cuarentena %.0f s tras %s: un hilo zombi puede seguir "
-            "ejecutando kernels; las evaluaciones siguientes se marcarán "
-            "gpu_tainted=True.", self._taint_window_s, why,
-        )
-
     def _penalise(self,
                   reason: PenaltyReason,
                   error: str,
-                  elapsed: float,
-                  candidate_dict: dict[str, Any] | None = None,
-                  tainted: bool = False) -> FitnessResult:
+                  elapsed: float) -> FitnessResult:
         """Create a fully-penalised ``FitnessResult`` for a failed evaluation."""
         self._n_failures += 1
         cfg = self._cfg
@@ -900,16 +811,12 @@ class FitnessEvaluator:
             energy_norm   = norms["energy_norm"],
             penalty_reason  = reason,
             penalty_applied = True,
-            gpu_tainted     = tainted,
             elapsed_seconds = round(elapsed, 2),
             error_message   = error[:500],
         )
         for cb in self._callbacks:
             try:
-                # El candidato REAL viaja también en los fallos: sin él,
-                # las filas penalizadas de evaluations.csv perdían el
-                # genoma y el fingerprint (imposible auditar QUÉ falló).
-                cb(result, candidate_dict or {})
+                cb(result, {})
             except Exception:  # noqa: BLE001
                 pass
         return result
@@ -972,39 +879,14 @@ def _run_with_timeout(fn: Callable, timeout_seconds: float, *args, **kwargs) -> 
     Exception
         Any exception raised by *fn* is re-raised in the calling thread.
     """
-    # NOTA (corrección crítica): la versión anterior usaba
-    # ``with ThreadPoolExecutor(...)`` — al propagar el TimeoutError, el
-    # ``__exit__`` del context manager ejecuta shutdown(wait=True) y se
-    # queda ESPERANDO al hilo colgado, de modo que un cuelgue real de
-    # CUDA/dataloader bloqueaba la búsqueda completa pese al timeout
-    # (y en Python >=3.9 los hilos del executor no son daemon, así que
-    # además impedían terminar el proceso). Esta implementación usa un
-    # hilo daemon explícito y devuelve el control de inmediato.
-    # LIMITACIÓN DOCUMENTADA: el hilo zombi no puede matarse; puede seguir
-    # ejecutando kernels GPU un tiempo (ver cuarentena gpu_tainted) y solo
-    # muere con el proceso. El aislamiento por subproceso resolvería esto
-    # pero exige re-crear el contexto CUDA por evaluación (cambio grande).
-    import threading
-    box: dict[str, Any] = {}
-
-    def _target() -> None:
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        future = executor.submit(fn, *args, **kwargs)
         try:
-            box["result"] = fn(*args, **kwargs)
-        except BaseException as exc:  # noqa: BLE001 — re-lanzada abajo
-            box["exc"] = exc
-
-    t = threading.Thread(target=_target, daemon=True,
-                         name="fitness-timeout-worker")
-    t.start()
-    t.join(timeout_seconds)
-    if t.is_alive():
-        raise TimeoutError(
-            f"Evaluation timed out after {timeout_seconds:.0f}s "
-            "(worker thread left running as daemon)"
-        )
-    if "exc" in box:
-        raise box["exc"]
-    return box["result"]
+            return future.result(timeout=timeout_seconds)
+        except _FuturesTimeout:
+            raise TimeoutError(
+                f"Evaluation timed out after {timeout_seconds:.0f}s"
+            )
 
 
 # ---------------------------------------------------------------------------

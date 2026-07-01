@@ -136,7 +136,7 @@ from src.profiling.ram_meter import measure_peak_ram
 # Constants
 # ---------------------------------------------------------------------------
 PROJECT_ROOT: Path = Path(__file__).resolve().parent
-DEFAULT_CONFIG: Path = PROJECT_ROOT / "config" / "deploy.yaml"
+DEFAULT_CONFIG: Path = PROJECT_ROOT / "configs" / "deploy.yaml"
 DEFAULT_RETRAIN_RESULTS: Path = PROJECT_ROOT / "results" / "retrain"
 DEFAULT_RESULTS_DIR: Path = PROJECT_ROOT / "results" / "deploy"
 DEFAULT_DEPLOY_DIR: Path = PROJECT_ROOT / "deployment" / "models"
@@ -403,33 +403,6 @@ class DeployPipeline:
         return f"{candidate_id}__{precision}"
 
     # ------------------------------------------------------------------
-    def _input_shape_for(self,
-                         candidate: dict[str, Any]) -> tuple[int, ...]:
-        """Per-candidate input shape derived from the genome.
-
-        The search and retraining stages operate at the genome's
-        ``arch_spec.input_size``; exporting/benchmarking every candidate at
-        a single global resolution would mis-measure candidates with a
-        different native input size. Batch and channel count still come
-        from ``cfg.input_shape``.
-        """
-        config = candidate.get("config", {})
-        arch = (config.get("arch_spec", {})
-                if isinstance(config, dict) else {})
-        sz = arch.get("input_size")
-        if not sz:
-            return tuple(self.cfg.input_shape)
-        b, c = int(self.cfg.input_shape[0]), int(self.cfg.input_shape[1])
-        shape = (b, c, int(sz), int(sz))
-        if shape != tuple(self.cfg.input_shape):
-            self.log.info(
-                "[%s] using genome input shape %s (config default is %s)",
-                candidate.get("candidate_id"), shape,
-                tuple(self.cfg.input_shape),
-            )
-        return shape
-
-    # ------------------------------------------------------------------
     def _load_trained_model(self, candidate: dict[str, Any]) -> torch.nn.Module:
         """Rebuild architecture, apply QAT wrapper, and load the checkpoint."""
         config = candidate["config"]
@@ -463,7 +436,7 @@ class DeployPipeline:
         result = export_to_onnx(
             model=model,
             output_path=onnx_path,
-            input_shape=self._input_shape_for(candidate),
+            input_shape=self.cfg.input_shape,
             opset=self.cfg.onnx_opset,
             convert_qat=True,
             dynamic_axes={"input": {0: "batch"}, "output": {0: "batch"}},
@@ -496,14 +469,11 @@ class DeployPipeline:
     # ------------------------------------------------------------------
     def _measure_artifact(self,
                           engine_path: Path,
-                          precision: str,
-                          input_shape: tuple[int, ...] | None = None,
-                          ) -> dict[str, Any]:
+                          precision: str) -> dict[str, Any]:
         """Run benchmark + energy + RAM measurements for a single engine."""
-        input_shape = tuple(input_shape or self.cfg.input_shape)
         bench = benchmark_engine(
             engine_path=engine_path,
-            input_shape=input_shape,
+            input_shape=self.cfg.input_shape,
             splits_dir=self.cfg.splits_dir,
             category=self.cfg.category,
             n_warmup=self.cfg.n_warmup,
@@ -516,7 +486,7 @@ class DeployPipeline:
             engine_path,
             n_iters=self.cfg.n_iters,
             device=self.cfg.device,
-            input_shape=input_shape,
+            input_shape=self.cfg.input_shape,
         )
         if energy.get("energy_mj") is not None and self.cfg.n_iters > 0:
             energy["energy_mj_per_inf"] = float(energy["energy_mj"]) / float(
@@ -528,7 +498,7 @@ class DeployPipeline:
         ram = measure_peak_ram(
             engine_path,
             device=self.cfg.device,
-            input_shape=input_shape,
+            input_shape=self.cfg.input_shape,
         )
         return {"bench": bench, "energy": energy, "ram": ram}
 
@@ -553,7 +523,6 @@ class DeployPipeline:
             return [self._failure_row(candidate, precision=None,
                                       stage="onnx", exc=exc)]
 
-        cand_shape = self._input_shape_for(candidate)
         rows: list[dict[str, Any]] = []
         for precision in self.cfg.precisions:
             row: dict[str, Any] = {
@@ -561,7 +530,7 @@ class DeployPipeline:
                 "precision": precision,
                 "status": "pending",
                 "onnx_path": str(onnx_path),
-                "input_shape": list(cand_shape),
+                "input_shape": list(self.cfg.input_shape),
                 "candidate_config": candidate.get("config", {}),
                 "retrain_test_auroc": retrain.get("test_auroc"),
                 "retrain_val_auroc":  retrain.get("val_auroc"),
@@ -587,8 +556,7 @@ class DeployPipeline:
 
             # 3. Benchmark + energy + RAM.
             try:
-                meas = self._measure_artifact(engine_path, precision,
-                                              input_shape=cand_shape)
+                meas = self._measure_artifact(engine_path, precision)
             except Exception as exc:  # noqa: BLE001
                 self.log.exception("[%s/%s] benchmark/profiling failed",
                                    cid, precision)
@@ -836,9 +804,6 @@ def _build_argparser() -> argparse.ArgumentParser:
     p.add_argument("--seed", type=int, default=None)
     p.add_argument("--device", type=str, default=None,
                    choices=[None, "cpu", "cuda"])
-    p.add_argument("--keep-old", action="store_true",
-                   help="Do NOT delete metrics/artifacts from a previous "
-                        "deploy run.")
     p.add_argument("--no-skip-existing", action="store_true",
                    help="Re-export ONNX/engines even if files already exist.")
     p.add_argument("--fail-fast", action="store_true")
@@ -877,45 +842,10 @@ def _apply_cli_overrides(cfg: DeployConfig,
     return cfg
 
 
-def _clean_previous_outputs(cfg: DeployConfig,
-                            logger: logging.Logger,
-                            clean_artifacts: bool) -> int:
-    """Delete outputs from a previous deploy run.
-
-    Metric files (CSV/JSON) are ALWAYS candidates for cleanup: mixing
-    measurements from different runs/devices in one CSV is never valid.
-    ONNX/engine artifacts are only removed when ``clean_artifacts`` is True
-    (i.e. ``skip_existing_engine`` is off), because reusing them is an
-    explicit, intended feature. Log files are not removed.
-    """
-    n_removed = 0
-    stale: list[Path] = [
-        cfg.results_dir / "runtime_metrics.csv",
-        cfg.results_dir / "final_embedded_rank.csv",
-        cfg.results_dir / "deploy_summary.json",
-    ]
-    if clean_artifacts and cfg.deploy_dir.is_dir():
-        stale += sorted(cfg.deploy_dir.glob("*.onnx"))
-        stale += sorted(cfg.deploy_dir.glob("*.engine"))
-        stale += sorted(cfg.deploy_dir.glob("*.json"))   # engine sidecars
-    for f in stale:
-        try:
-            if f.is_file():
-                f.unlink()
-                n_removed += 1
-        except OSError as exc:
-            logger.warning("Could not remove stale file %s: %s", f, exc)
-    if n_removed:
-        logger.info("Cleanup: removed %d stale artifact(s) from previous "
-                    "deploy run (use --keep-old to disable).", n_removed)
-    return n_removed
-
-
 def main(argv: list[str] | None = None) -> int:
     args = _build_argparser().parse_args(argv)
-    config_found = args.config.is_file()
     cfg = (DeployConfig.from_file(args.config)
-           if config_found else DeployConfig())
+           if args.config.is_file() else DeployConfig())
     cfg = _apply_cli_overrides(cfg, args)
 
     log_path = cfg.results_dir / "deploy.log"
@@ -923,20 +853,6 @@ def main(argv: list[str] | None = None) -> int:
         log_path=log_path,
         level=logging.WARNING if args.quiet else logging.INFO,
     )
-    if not config_found:
-        logger.warning(
-            "Config file %s NOT found — running with built-in defaults. "
-            "Pass --config or create the file to control the run.",
-            args.config,
-        )
-
-    if args.keep_old:
-        logger.info("Cleanup skipped: --keep-old requested.")
-    else:
-        _clean_previous_outputs(
-            cfg, logger,
-            clean_artifacts=not cfg.skip_existing_engine,
-        )
 
     try:
         DeployPipeline(cfg, logger=logger).run()

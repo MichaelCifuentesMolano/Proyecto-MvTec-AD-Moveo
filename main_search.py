@@ -86,7 +86,7 @@ Assumptions
   ``FitnessEvaluator``.
 - The fitness evaluator owns dataloader construction so the search loop stays
   agnostic to dataset specifics.
-- Configuration is supplied via a YAML file (default ``configs/search.yaml``);
+- Configuration is supplied via a YAML file (default ``config/search.yaml``);
   CLI flags override individual fields.
 """
 
@@ -94,6 +94,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import hashlib
 import json
 import logging
 import sys
@@ -103,6 +104,11 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
+
+try:
+    import torch
+except ImportError:  # pragma: no cover
+    torch = None
 
 try:
     import yaml  # type: ignore
@@ -115,7 +121,7 @@ except ImportError:  # pragma: no cover
 from src.nas.search_space import SearchSpace, SearchSpaceConfig, ArchSearchConfig, QuantSearchConfig
 from src.nas.encoding import GenomeEncoder as Encoder
 from src.nas.nsga2_engine import NSGA2Engine, NSGA2Config
-from src.nas.fitness import FitnessEvaluator, FitnessConfig
+from src.nas.fitness import FitnessEvaluator, FitnessConfig, PenaltyReason
 from src.nas.pareto import pareto_front as compute_pareto_front, crowding_distance
 from src.models.model_factory import build_model
 from src.quantization.qat_wrapper import wrap_for_qat
@@ -123,12 +129,15 @@ from src.profiling.latency_meter import measure_latency
 from src.profiling.ram_meter import measure_peak_ram
 from src.profiling.energy_meter import measure_energy
 from src.evaluation.auroc_eval import evaluate_auroc
+from src.utils.set_seed import set_seed
 
 
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
 PROJECT_ROOT: Path = Path(__file__).resolve().parent
+# NOTE: the config folder is ``config/`` (singular). A previous version
+# pointed at ``configs/`` and silently fell back to built-in defaults.
 DEFAULT_CONFIG: Path = PROJECT_ROOT / "config" / "search.yaml"
 DEFAULT_RESULTS_DIR: Path = PROJECT_ROOT / "results" / "search"
 DEFAULT_SPLITS_DIR: Path = PROJECT_ROOT / "data" / "splits"
@@ -158,27 +167,14 @@ class SearchConfig:
     n_generations: int = 30
     crossover_prob: float = 0.9
     mutation_prob: float | None = None  # None -> 1/genome_length
-    eta_c: float = 15.0                 # SBX distribution index (UNUSED by the
-    eta_m: float = 20.0                 # current integer-genome engine, which
-                                        # uses single-point crossover + random-
-                                        # reset mutation; kept for compatibility)
+    eta_c: float = 15.0                 # SBX index (reserved; engine uses single_point/uniform)
+    eta_m: float = 20.0                 # polynomial mutation index (reserved)
+    tournament_size: int = 2
 
-    # Hypervolume reference point, order: [neg_auroc, latency_ms,
-    # peak_ram_mb, energy_mj]. Must STRICTLY dominate (be worse than) every
-    # feasible measurement, otherwise valid points contribute zero HV (this
-    # silently happened in the pilot run: energy ref 1000 mJ < real PC
-    # energy). Penalised evaluations must fall OUTSIDE the reference so
-    # failures never inflate the indicator. Calibrate after generation 1
-    # using evaluations.csv.
-    hv_reference: list[float] = field(
-        default_factory=lambda: [0.0, 1000.0, 8192.0, 5000.0]
-    )
-    # Engine penalty vector for failed evaluations — aligned with
-    # FitnessConfig penalties so a failure is encoded identically whether it
-    # happens inside the evaluator or as an exception in the engine.
-    penalty_objectives: list[float] = field(
-        default_factory=lambda: [0.0, 9999.0, 65536.0, 9999.0]
-    )
+    # Hypervolume reference point (order: neg_auroc, latency, ram, energy).
+    # None -> derived from the fitness penalty values so that every feasible
+    # solution strictly dominates the reference point.
+    hv_reference: list[float] | None = None
 
     # Search space + evaluator specs (free-form dicts, validated downstream)
     search_space: dict[str, Any] = field(default_factory=dict)
@@ -191,80 +187,9 @@ class SearchConfig:
 
     # Resume / checkpointing
     resume_from: Path | None = None     # pickle/npz with population genomes
-
-    # Run hygiene / safety
-    keep_old: bool = False              # True -> do NOT delete previous outputs
-    allow_noop_energy: bool = False     # True -> tolerate energy backend 'noop'
+    force_finalize: bool = False        # overwrite final artifacts on a 0-gen resume
 
     extra: dict[str, Any] = field(default_factory=dict)
-
-    # ------------------------------------------------------------------
-    def __post_init__(self) -> None:
-        # Range/shape validation runs at construction time so an invalid
-        # config can never start a multi-hour search. Path checks are
-        # deferred to validate(check_paths=True), called in main() AFTER
-        # CLI overrides (a CLI flag may legitimately fix a default path).
-        self.validate(check_paths=False)
-
-    def validate(self, check_paths: bool = True) -> None:
-        """Fail fast on invalid, inconsistent or incomplete configuration.
-
-        Raises
-        ------
-        ValueError / FileNotFoundError
-            With an explicit message. No silent fallbacks.
-        """
-        if self.population_size < 4:
-            raise ValueError(
-                f"population_size={self.population_size} inválido (mínimo 4).")
-        if self.n_generations < 1:
-            raise ValueError(
-                f"n_generations={self.n_generations} inválido (mínimo 1). "
-                "Un valor <= 0 produciría una 'búsqueda' vacía que termina "
-                "con éxito aparente sin buscar nada.")
-        if self.top_k < 1:
-            raise ValueError(f"top_k={self.top_k} inválido (mínimo 1).")
-        if self.seed < 0:
-            raise ValueError(f"seed={self.seed} inválido (debe ser >= 0).")
-        if not (0.0 <= self.crossover_prob <= 1.0):
-            raise ValueError(
-                f"crossover_prob={self.crossover_prob} fuera de [0, 1].")
-        if self.mutation_prob is not None and not (0.0 < self.mutation_prob <= 1.0):
-            raise ValueError(
-                f"mutation_prob={self.mutation_prob} fuera de (0, 1].")
-        if len(self.hv_reference) != N_OBJECTIVES:
-            raise ValueError(
-                f"hv_reference debe tener {N_OBJECTIVES} elementos "
-                f"(orden {OBJECTIVE_NAMES}); tiene {len(self.hv_reference)}.")
-        if len(self.penalty_objectives) != N_OBJECTIVES:
-            raise ValueError(
-                f"penalty_objectives debe tener {N_OBJECTIVES} elementos; "
-                f"tiene {len(self.penalty_objectives)}.")
-        # Cost objectives (latency, RAM, energy): the penalty must lie
-        # STRICTLY OUTSIDE the hypervolume reference box, otherwise failed
-        # evaluations inflate the hypervolume indicator.
-        for i in range(1, N_OBJECTIVES):
-            if self.penalty_objectives[i] <= self.hv_reference[i]:
-                raise ValueError(
-                    f"penalty_objectives[{i}]={self.penalty_objectives[i]} "
-                    f"debe ser > hv_reference[{i}]={self.hv_reference[i]} "
-                    f"({OBJECTIVE_NAMES[i]}): si el penalti cae dentro de la "
-                    "caja de referencia, los fallos inflan el hipervolumen.")
-        if check_paths:
-            if not Path(self.splits_dir).is_dir():
-                raise FileNotFoundError(
-                    f"splits_dir no existe: {self.splits_dir} — ejecuta "
-                    "main_prepare.py o corrige la ruta.")
-            split_manifest = Path(self.splits_dir) / f"{self.category}.json"
-            if not split_manifest.is_file():
-                raise FileNotFoundError(
-                    f"No hay manifest de splits para la categoría "
-                    f"'{self.category}': {split_manifest}")
-            try:
-                Path(self.results_dir).mkdir(parents=True, exist_ok=True)
-            except OSError as exc:
-                raise ValueError(
-                    f"results_dir no es escribible: {self.results_dir} ({exc})")
 
     # ------------------------------------------------------------------
     @classmethod
@@ -283,8 +208,46 @@ class SearchConfig:
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "SearchConfig":
-        """Build a SearchConfig from a plain dict, coercing path fields."""
+        """Build a SearchConfig from a plain dict, coercing path fields.
+
+        Accepts both the flat schema (fields of this dataclass at top level)
+        and the legacy nested schema (``algorithm:``, ``operators:``,
+        ``hypervolume:``, ``parallelism:``), which is flattened here so that
+        an older YAML cannot silently be ignored again.
+        """
         kwargs = dict(data)
+
+        # ---- Legacy nested-schema support ------------------------------
+        algo = kwargs.pop("algorithm", None) or {}
+        for key in ("seed", "population_size", "n_generations"):
+            if key in algo:
+                kwargs.setdefault(key, algo[key])
+        if algo.get("warm_start_checkpoint"):
+            kwargs.setdefault("resume_from", algo["warm_start_checkpoint"])
+
+        ops = kwargs.pop("operators", None) or {}
+        xover = ops.get("crossover", {}) or {}
+        mut = ops.get("mutation", {}) or {}
+        if "probability" in xover:
+            kwargs.setdefault("crossover_prob", xover["probability"])
+        if "eta" in xover:
+            kwargs.setdefault("eta_c", xover["eta"])
+        if "probability" in mut:
+            kwargs.setdefault("mutation_prob", mut["probability"])
+        if "eta" in mut:
+            kwargs.setdefault("eta_m", mut["eta"])
+        if "tournament_size" in ops:
+            kwargs.setdefault("tournament_size", ops["tournament_size"])
+
+        hv = kwargs.pop("hypervolume", None) or {}
+        if "reference_point" in hv:
+            kwargs.setdefault("hv_reference", hv["reference_point"])
+
+        par = kwargs.pop("parallelism", None) or {}
+        if "n_workers" in par:
+            kwargs.setdefault("n_workers", par["n_workers"])
+        # -----------------------------------------------------------------
+
         for key in ("splits_dir", "results_dir", "resume_from"):
             if key in kwargs and kwargs[key] is not None:
                 kwargs[key] = Path(kwargs[key])
@@ -295,12 +258,6 @@ class SearchConfig:
         cfg = cls(**kwargs)
         if extra:
             cfg.extra.update(extra)
-            # A typo in a YAML key must never become a silent default.
-            logging.getLogger("search").warning(
-                "Claves de configuración NO reconocidas (¿typo?): %s — "
-                "se ignoran y se usa el default para el campo real.",
-                sorted(extra),
-            )
         return cfg
 
     def to_dict(self) -> dict[str, Any]:
@@ -338,43 +295,6 @@ def _configure_logging(log_path: Path | None,
 
 
 # ---------------------------------------------------------------------------
-# Stale-output cleanup
-# ---------------------------------------------------------------------------
-# Artifacts produced by a previous search run. They are removed before a
-# fresh run so that old and new results can never be mixed in the same
-# directory. Log files are intentionally NOT removed (the logger keeps an
-# open handle on them).
-_STALE_PATTERNS: tuple[str, ...] = (
-    "population_gen_*.csv", "history.csv", "evaluations.csv",
-    "pareto_front.csv",
-    "best_candidates.json", "final_population.npz",
-    "latest_checkpoint.json", "latest_checkpoint.npz",
-    "search_config.json", "search_summary.json", "run_metadata.json",
-    "pareto_front.png", "convergence.png", "convergence.csv",
-)
-
-
-def _clean_previous_outputs(results_dir: Path, logger: logging.Logger) -> int:
-    """Delete artifacts from a previous run inside ``results_dir``.
-
-    Returns the number of files removed. Never raises: a file that cannot
-    be removed (e.g. locked) is reported and skipped.
-    """
-    n_removed = 0
-    for pattern in _STALE_PATTERNS:
-        for f in sorted(results_dir.glob(pattern)):
-            try:
-                f.unlink()
-                n_removed += 1
-            except OSError as exc:
-                logger.warning("Could not remove stale file %s: %s", f, exc)
-    if n_removed:
-        logger.info("Cleanup: removed %d stale artifact(s) from %s "
-                    "(use --keep-old to disable).", n_removed, results_dir)
-    return n_removed
-
-
-# ---------------------------------------------------------------------------
 # CSV / JSON helpers
 # ---------------------------------------------------------------------------
 class HistoryWriter:
@@ -383,21 +303,14 @@ class HistoryWriter:
     def __init__(self, path: Path) -> None:
         self.path = path
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        # Lazy open: the file is only opened (in append mode) on the first
-        # actual write. Opening eagerly with mode "w" truncated history.csv
-        # to 0 bytes whenever a resumed run had no generations left to run.
-        self._fh = None
+        self._fh = self.path.open("w", newline="", encoding="utf-8")
         self._writer: csv.DictWriter | None = None
 
     def write(self, row: dict[str, Any]) -> None:
-        if self._fh is None:
-            is_new = (not self.path.is_file()
-                      or self.path.stat().st_size == 0)
-            self._fh = self.path.open("a", newline="", encoding="utf-8")
+        if self._writer is None:
             self._writer = csv.DictWriter(self._fh,
                                           fieldnames=list(row.keys()))
-            if is_new:
-                self._writer.writeheader()
+            self._writer.writeheader()
         # Coerce non-scalar values to JSON for round-trippable storage.
         clean = {k: (json.dumps(v, default=str)
                      if isinstance(v, (dict, list, tuple)) else v)
@@ -406,7 +319,7 @@ class HistoryWriter:
         self._fh.flush()
 
     def close(self) -> None:
-        if self._fh is not None and not self._fh.closed:
+        if not self._fh.closed:
             self._fh.close()
 
 
@@ -416,7 +329,7 @@ def _write_population_csv(path: Path,
                           meta: list[dict[str, Any]]) -> None:
     """Persist a single generation's population to CSV."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    fieldnames = (["generation", "individual", "fingerprint"]
+    fieldnames = (["generation", "individual"]
                   + list(OBJECTIVE_NAMES)
                   + ["valid", "error", "candidate", "metrics"])
     with path.open("w", newline="", encoding="utf-8") as fh:
@@ -426,7 +339,6 @@ def _write_population_csv(path: Path,
             row = {
                 "generation": gen,
                 "individual": i,
-                "fingerprint": m.get("fingerprint"),
                 "valid": m.get("valid", True),
                 "error": m.get("error"),
                 "candidate": json.dumps(m.get("candidate", {}), default=str),
@@ -445,10 +357,9 @@ def _write_pareto_csv(path: Path,
     path.parent.mkdir(parents=True, exist_ok=True)
     front_obj = objectives[indices]
     cd = crowding_distance(front_obj) if len(indices) else np.array([])
-    fieldnames = (["pareto_rank", "individual_index", "fingerprint",
-                   "crowding_distance"]
+    fieldnames = (["pareto_rank", "individual_index", "crowding_distance"]
                   + list(OBJECTIVE_NAMES)
-                  + ["valid", "error", "candidate", "metrics"])
+                  + ["candidate", "metrics"])
     with path.open("w", newline="", encoding="utf-8") as fh:
         w = csv.DictWriter(fh, fieldnames=fieldnames)
         w.writeheader()
@@ -457,10 +368,7 @@ def _write_pareto_csv(path: Path,
             row = {
                 "pareto_rank": rank,
                 "individual_index": int(idx),
-                "fingerprint": m.get("fingerprint"),
                 "crowding_distance": float(cd[rank]) if len(cd) else None,
-                "valid": m.get("valid", True),
-                "error": m.get("error"),
                 "candidate": json.dumps(m.get("candidate", {}), default=str),
                 "metrics": json.dumps(m.get("metrics", {}), default=str),
             }
@@ -474,25 +382,38 @@ def _write_best_candidates_json(path: Path,
                                 meta: list[dict[str, Any]],
                                 pareto_idx: np.ndarray,
                                 top_k: int) -> None:
-    """Persist top-K candidates from the Pareto front (by AUROC then latency)."""
+    """Persist top-K Pareto candidates.
+
+    Ranking: normalised Euclidean distance to the ideal point, computed only
+    over *operative* objectives (columns with non-zero spread). A measurement
+    channel that returned its penalty value for every individual (e.g. energy
+    on a platform without a power sensor) is thereby excluded instead of
+    silently distorting — or being ignored by — the selection.
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
     if len(pareto_idx) == 0:
         path.write_text(json.dumps({"candidates": []}, indent=2),
                         encoding="utf-8")
         return
     front = objectives[pareto_idx]
-    # Lexicographic priority: highest AUROC (= lowest neg_auroc), then lowest latency.
-    order = np.lexsort((front[:, 1], front[:, 0]))
+    span = front.max(axis=0) - front.min(axis=0)
+    active = span > 1e-12
+    if not active.any():                      # degenerate: all columns constant
+        active = np.ones(front.shape[1], dtype=bool)
+        span = np.ones(front.shape[1])
+    norm = (front[:, active] - front[:, active].min(axis=0)) / span[active]
+    dist = np.sqrt((norm ** 2).sum(axis=1))
+    order = np.argsort(dist, kind="stable")
     chosen = pareto_idx[order][:top_k]
     payload = {
         "objective_names": list(OBJECTIVE_NAMES),
+        "ranking": ("normalised Euclidean distance to the ideal point over "
+                    "operative objectives"),
+        "active_objectives": [n for n, a in zip(OBJECTIVE_NAMES, active) if a],
         "candidates": [
             {
                 "rank": r,
                 "individual_index": int(idx),
-                "fingerprint": meta[idx].get("fingerprint"),
-                "valid": meta[idx].get("valid", True),
-                "error": meta[idx].get("error"),
                 "objectives": {n: float(objectives[idx, j])
                                for j, n in enumerate(OBJECTIVE_NAMES)},
                 "candidate": meta[idx].get("candidate", {}),
@@ -517,91 +438,89 @@ class SearchPipeline:
         self.log = logger or logging.getLogger("search")
         self.cfg.results_dir.mkdir(parents=True, exist_ok=True)
 
+        # Seed *all* RNG subsystems (python/numpy/torch/cuda), not only numpy:
+        # the fitness evaluator trains models, so torch must be seeded too.
+        seed_state = set_seed(cfg.seed, deterministic_torch=True)
+        try:
+            (self.cfg.results_dir / "seed_state.json").write_text(
+                json.dumps(asdict(seed_state), indent=2, default=str),
+                encoding="utf-8")
+        except TypeError:  # set_seed returned a plain dict
+            (self.cfg.results_dir / "seed_state.json").write_text(
+                json.dumps(seed_state, indent=2, default=str),
+                encoding="utf-8")
+
         self._rng = np.random.default_rng(cfg.seed)
         self._history_writer = HistoryWriter(
             self.cfg.results_dir / "history.csv"
         )
-        # True per-evaluation trace (one row per fitness call, including
-        # penalty reason, timings and normalised objectives) — fed by the
-        # FitnessEvaluator callback. This is the primary input for the
-        # convergence / robustness analysis.
-        self._eval_writer = HistoryWriter(
-            self.cfg.results_dir / "evaluations.csv"
-        )
         self._global_eval_idx = 0
-        self._fitness_eval_idx = 0
+        self._current_gen = 0
 
-        # Encoder propio del pipeline (misma clase y espacio que el del
-        # motor) para fingerprints y decodificación sin tocar privados.
+        # Real per-candidate evaluation records, keyed by candidate hash.
+        # Populated by the FitnessEvaluator callback so that population CSVs
+        # and the Pareto front carry *measured* metrics, not placeholders.
+        self._results_by_key: dict[str, dict[str, Any]] = {}
         self._encoder: Encoder | None = None
-        # Registro fingerprint -> última evaluación real del FitnessEvaluator.
-        # Es la fuente de verdad de metrics/valid/error para history.csv,
-        # population_gen_*.csv, pareto_front.csv y best_candidates.json
-        # (antes se reconstruían con dicts vacíos y valid=True fijo).
-        self._eval_registry: dict[str, dict[str, Any]] = {}
-        # Rachas para el watchdog de degeneración de objetivos.
-        self._degen_streaks: dict[str, int] = {n: 0 for n in OBJECTIVE_NAMES}
-        self._full_front_streak: int = 0
+        self._fitness_config: FitnessConfig | None = None
 
     # ------------------------------------------------------------------
-    def _fingerprint_of(self, candidate: dict) -> str | None:
-        """Stable hex id of a candidate dict (None if not encodable)."""
-        if not candidate or self._encoder is None:
-            return None
-        try:
-            return self._encoder.fingerprint(self._encoder.encode(candidate))
-        except Exception:  # noqa: BLE001
-            return None
+    @staticmethod
+    def _candidate_key(candidate: dict[str, Any]) -> str:
+        blob = json.dumps(candidate, sort_keys=True, default=str)
+        return hashlib.sha1(blob.encode("utf-8")).hexdigest()
 
     # ------------------------------------------------------------------
-    def _log_evaluation(self, result: Any, candidate: dict) -> None:
-        """FitnessEvaluator callback: persist one row per evaluation."""
-        try:
-            fp = self._fingerprint_of(candidate)
-            row: dict[str, Any] = {
-                "eval_id": self._fitness_eval_idx,
-                "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S"),
-                "fingerprint": fp,
-            }
-            row.update(result.to_dict())
-            row["candidate"] = candidate
-            self._eval_writer.write(row)
-            if fp is not None:
-                # Última evaluación gana (si un genoma duplicado se
-                # re-evalúa, el frente final usa la medición más reciente).
-                self._eval_registry[fp] = {
-                    "metrics": result.to_dict(),
-                    "valid": not bool(getattr(result, "penalty_applied", False)),
-                    "error": getattr(result, "error_message", "") or None,
-                }
-        except Exception:  # noqa: BLE001 — logging must never kill the search
-            self.log.warning("Could not log evaluation row", exc_info=True)
-        finally:
-            self._fitness_eval_idx += 1
+    def _on_eval_result(self, result: Any, candidate: dict[str, Any]) -> None:
+        """FitnessEvaluator callback — persist every *real* evaluation.
 
-    # ------------------------------------------------------------------
-    def _meta_for(self, gene_vec: np.ndarray) -> dict[str, Any]:
-        """Real per-individual metadata, joined by CANONICAL fingerprint.
-
-        The fingerprint is computed on encode(decode(gene)) — never on the
-        raw gene vector — because inactive slot genes (stages beyond
-        n_stages) are arbitrary: two raw genomes with identical PHENOTYPE
-        can differ in inactive genes. Canonicalising guarantees the join
-        with evaluations.csv (whose fingerprints come from the decoded
-        candidate dict) is exact.
+        This is the traceability contract of the testbed: each row in
+        ``history.csv`` corresponds to one actual pipeline execution
+        (build → QAT → train → AUROC → hardware profiling).
         """
-        assert self._encoder is not None
-        candidate = self._encoder.gene_to_dict(gene_vec)
-        fp = self._fingerprint_of(candidate)
-        reg = self._eval_registry.get(fp)
-        if reg is not None:
-            return {"valid": reg["valid"], "error": reg["error"],
-                    "candidate": candidate, "metrics": reg["metrics"],
-                    "fingerprint": fp}
-        # Individuo sin registro (p. ej. población restaurada de un
-        # checkpoint legacy): no inventar valid=True.
-        return {"valid": None, "error": "no_evaluation_record",
-                "candidate": candidate, "metrics": {}, "fingerprint": fp}
+        reason = getattr(result, "penalty_reason", PenaltyReason.NONE)
+        # Profiling failures keep a real AUROC → usable but flagged.
+        valid = reason in (PenaltyReason.NONE, PenaltyReason.PROFILING_FAILED)
+        metrics = result.to_dict() if hasattr(result, "to_dict") else {}
+        error = getattr(result, "error_message", "") or None
+
+        self._results_by_key[self._candidate_key(candidate)] = {
+            "valid": valid,
+            "error": error,
+            "metrics": metrics,
+        }
+
+        row: dict[str, Any] = {
+            "eval_id": self._global_eval_idx,
+            "generation": self._current_gen,
+            "valid": valid,
+            "penalty_reason": getattr(reason, "value", str(reason)),
+            "neg_auroc": -float(getattr(result, "auroc", 0.0)),
+            "latency_ms": float(getattr(result, "latency_ms", float("nan"))),
+            "peak_ram_mb": float(getattr(result, "peak_ram_mb", float("nan"))),
+            "energy_mj": float(getattr(result, "energy_mj", float("nan"))),
+            "profiling_ok": bool(getattr(result, "profiling_ok", False)),
+            "elapsed_seconds": float(getattr(result, "elapsed_seconds", 0.0)),
+            "error": error,
+            "candidate": candidate,
+            "metrics": metrics,
+        }
+        self._history_writer.write(row)
+        self._global_eval_idx += 1
+
+    # ------------------------------------------------------------------
+    def _population_meta(self,
+                         population: np.ndarray) -> list[dict[str, Any]]:
+        """Attach real evaluation records to each individual in a population."""
+        meta: list[dict[str, Any]] = []
+        for gene in population:
+            cand = self._encoder.gene_to_dict(gene)
+            rec = self._results_by_key.get(self._candidate_key(cand))
+            if rec is None:
+                rec = {"valid": True, "error": "no evaluation record found",
+                       "metrics": {}}
+            meta.append({**rec, "candidate": cand})
+        return meta
 
     # ------------------------------------------------------------------
     def _build_components(self) -> tuple[Encoder, FitnessEvaluator]:
@@ -615,33 +534,41 @@ class SearchPipeline:
             space_config = None
         space = SearchSpace(config=space_config)
         encoder = Encoder(search_space=space)
-        # Disponible ANTES de crear el evaluador: el callback de registro
-        # necesita el encoder para calcular fingerprints canónicos.
-        self._encoder = encoder
 
-        self.log.info("Building fitness evaluator (device=%s)", self.cfg.device)
+        # Device sanity check: fall back to CPU explicitly (and loudly)
+        # instead of relying on downstream silent fallbacks.
+        device = self.cfg.device
+        if device == "cuda" and (torch is None or not torch.cuda.is_available()):
+            self.log.warning("CUDA requested but not available — "
+                             "falling back to device='cpu'.")
+            device = "cpu"
+            self.cfg.device = device
+
+        if self.cfg.n_workers > 1:
+            self.log.warning("n_workers=%d requested, but the NSGA-II engine "
+                             "evaluates candidates serially; running with 1.",
+                             self.cfg.n_workers)
+
+        self.log.info("Building fitness evaluator (device=%s)", device)
         fitness_cfg_dict = {
             "splits_dir": str(self.cfg.splits_dir),
             "category": self.cfg.category,
-            "device": self.cfg.device,
-            # CAMBIO 8 (determinismo): la semilla de entrenamiento proxy se
-            # deriva de la semilla del experimento (antes era 0 cableado en
-            # fitness.py). Sigue siendo LA MISMA para todos los candidatos
-            # de una corrida (comparación justa entre candidatos), pero
-            # corridas con seed distinto son ahora verdaderamente
-            # independientes también en la inicialización de pesos y el
-            # shuffle de datos. Sobreescribible vía fitness.train_seed.
-            "train_seed": int(self.cfg.seed),
+            "device": device,
             **self.cfg.fitness
         }
         # Filter kwargs to match FitnessConfig fields
         from dataclasses import fields
         valid_keys = {f.name for f in fields(FitnessConfig)}
+        unknown = set(fitness_cfg_dict) - valid_keys
+        if unknown:
+            self.log.warning("Ignoring unknown fitness config keys: %s",
+                             sorted(unknown))
         filtered_cfg = {k: v for k, v in fitness_cfg_dict.items() if k in valid_keys}
         fitness_config = FitnessConfig(**filtered_cfg)
+        self._fitness_config = fitness_config
         evaluator = FitnessEvaluator(
             config=fitness_config,
-            extra_callbacks=[self._log_evaluation],
+            extra_callbacks=[self._on_eval_result],
         )
         return encoder, evaluator
 
@@ -673,137 +600,46 @@ class SearchPipeline:
         raise ValueError(f"Unsupported resume format: {path.suffix}")
 
     # ------------------------------------------------------------------
-    def _write_run_metadata(self, energy_source: str) -> None:
-        """Persist everything needed to reconstruct this run in 2 years.
-
-        Pure-stdlib: the git commit is read directly from .git/ (no git
-        binary required); `git diff` is attempted via subprocess but its
-        absence only yields "unavailable", never an error.
-        """
-        import platform
-        import subprocess
-        import hashlib
-
-        meta: dict[str, Any] = {
-            "timestamp_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-            "platform": platform.platform(),
-            "hostname": platform.node(),
-            "python": sys.version,
-            "argv": sys.argv,
-            "seed": self.cfg.seed,
-            "energy_backend": energy_source,
-            "config": self.cfg.to_dict(),
-        }
-        # --- git commit, leído del propio .git (sin binario externo) ----
-        git_dir = PROJECT_ROOT / ".git"
-        commit = "unavailable"
-        try:
-            head = (git_dir / "HEAD").read_text(encoding="utf-8").strip()
-            if head.startswith("ref:"):
-                ref = head.split(" ", 1)[1].strip()
-                ref_file = git_dir / ref
-                if ref_file.is_file():
-                    commit = ref_file.read_text(encoding="utf-8").strip()
-                else:  # packed refs
-                    packed = git_dir / "packed-refs"
-                    if packed.is_file():
-                        for line in packed.read_text(encoding="utf-8").splitlines():
-                            if line.endswith(ref):
-                                commit = line.split(" ", 1)[0]
-                                break
-            else:
-                commit = head  # detached HEAD
-        except OSError:
-            pass
-        meta["git_commit"] = commit
-        try:  # diff de trabajo (best-effort; requiere binario git)
-            diff = subprocess.run(
-                ["git", "diff", "HEAD"], cwd=PROJECT_ROOT,
-                capture_output=True, text=True, timeout=10,
-            )
-            meta["git_diff"] = diff.stdout if diff.returncode == 0 else "unavailable"
-            meta["git_dirty"] = bool(meta["git_diff"].strip()) \
-                if meta["git_diff"] != "unavailable" else None
-        except Exception:  # noqa: BLE001
-            meta["git_diff"] = "unavailable"
-            meta["git_dirty"] = None
-        # --- stack de cómputo -------------------------------------------
-        try:
-            import torch
-            meta["torch"] = torch.__version__
-            meta["cuda"] = torch.version.cuda
-            meta["cudnn"] = torch.backends.cudnn.version()
-            if torch.cuda.is_available():
-                meta["gpu"] = torch.cuda.get_device_name(0)
-                meta["driver_capability"] = ".".join(
-                    map(str, torch.cuda.get_device_capability(0)))
-        except Exception:  # noqa: BLE001
-            meta["torch"] = "unavailable"
-        meta["numpy"] = np.__version__
-        # --- huella del dataset (manifest de splits de la categoría) ----
-        split = Path(self.cfg.splits_dir) / f"{self.cfg.category}.json"
-        if split.is_file():
-            meta["split_manifest_sha256"] = hashlib.sha256(
-                split.read_bytes()).hexdigest()
-        # --- huella del espacio de búsqueda ------------------------------
-        try:
-            from src.nas.nsga2_engine import search_space_hash
-            meta["search_space_hash"] = search_space_hash()
-        except Exception:  # noqa: BLE001
-            pass
-        (self.cfg.results_dir / "run_metadata.json").write_text(
-            json.dumps(meta, indent=2, default=str), encoding="utf-8")
-        self.log.info("run_metadata.json escrito (commit=%s, energía=%s)",
-                      commit[:12], energy_source)
-
-    # ------------------------------------------------------------------
-    def _probe_energy_backend(self) -> str:
-        """Run a tiny measurement to discover the active energy backend."""
-        try:
-            import torch
-            from src.profiling.energy_meter import measure_energy
-            dev = self.cfg.device if torch.cuda.is_available() else "cpu"
-            probe = torch.nn.Conv2d(3, 8, 3).to(dev)
-            r = measure_energy(probe, input_shape=(1, 3, 64, 64),
-                               device=dev, n_warmup=2, n_iters=5)
-            return str(r.get("source", "unknown"))
-        except Exception as exc:  # noqa: BLE001
-            self.log.warning("Energy backend probe failed: %s", exc)
-            return "error"
-
-    # ------------------------------------------------------------------
     def _on_generation_end(self,
                            gen: int,
                            result: Any,
                            engine: NSGA2Engine) -> None:
-        """Callback invoked by the NSGA-II engine after each generation."""
+        """Callback invoked by the NSGA-II engine after each generation.
+
+        Per-individual measurements are *not* fabricated here: they come from
+        the real evaluation records captured by :meth:`_on_eval_result`.
+        (Per-evaluation rows are appended to ``history.csv`` by that callback
+        at evaluation time, so nothing is duplicated here.)
+        """
+        self._current_gen = gen
         population = engine.population
         objectives = engine.objectives
-        # Metadatos REALES por individuo (join por fingerprint canónico con
-        # el registro alimentado por el FitnessEvaluator) — nunca dicts
-        # vacíos con valid=True incondicional.
-        meta = [self._meta_for(population[i]) for i in range(len(population))]
+        meta = self._population_meta(population)
 
-        # Per-generation population CSV
+        # Per-generation population CSV (with real metrics attached).
         gen_path = self.cfg.results_dir / f"population_gen_{gen:03d}.csv"
         _write_population_csv(gen_path, gen, objectives, meta)
 
-        # Append every individual to the global history
-        for i, (obj, m) in enumerate(zip(objectives, meta)):
-            row: dict[str, Any] = {
-                "eval_id": self._global_eval_idx,
-                "generation": gen,
-                "individual": i,
-                "valid": m.get("valid", True),
-                "error": m.get("error"),
-            }
-            for j, name in enumerate(OBJECTIVE_NAMES):
-                row[name] = float(obj[j]) if obj is not None else None
-            row["fingerprint"] = m.get("fingerprint")
-            row["candidate"] = m.get("candidate", {})
-            row["metrics"] = m.get("metrics", {})
-            self._history_writer.write(row)
-            self._global_eval_idx += 1
+        # Per-generation convergence statistics (hypervolume, Pareto size…).
+        gen_stats_path = self.cfg.results_dir / "generations.csv"
+        stats_row = {
+            "generation": gen,
+            "n_pareto": getattr(result, "n_pareto", None),
+            "hypervolume": getattr(result, "hypervolume", None),
+            "best_auroc": getattr(result, "best_auroc", None),
+            "best_latency_ms": getattr(result, "best_latency_ms", None),
+            "best_ram_mb": getattr(result, "best_ram_mb", None),
+            "best_energy_mj": getattr(result, "best_energy_mj", None),
+            "mean_auroc": getattr(result, "mean_auroc", None),
+            "n_failed_evals": getattr(result, "n_failed_evals", None),
+            "elapsed_seconds": getattr(result, "elapsed_seconds", None),
+        }
+        write_header = not gen_stats_path.is_file()
+        with gen_stats_path.open("a", newline="", encoding="utf-8") as fh:
+            w = csv.DictWriter(fh, fieldnames=list(stats_row.keys()))
+            if write_header:
+                w.writeheader()
+            w.writerow(stats_row)
 
         self.log.info(
             "Gen %03d done — best AUROC=%.4f, min latency=%.2f ms, "
@@ -812,57 +648,9 @@ class SearchPipeline:
             len(meta) - result.n_failed_evals, len(meta),
         )
 
-        # ---- watchdog de degeneración de objetivos (CAMBIO 5) -----------
-        self._degeneration_watchdog(gen, np.asarray(objectives, float),
-                                    result)
-
         # Auto-checkpointing for easy resume
         ckpt_path = self.cfg.results_dir / "latest_checkpoint"
         engine.checkpoint(ckpt_path)
-
-    # ------------------------------------------------------------------
-    def _degeneration_watchdog(self, gen: int, obj: np.ndarray,
-                               result: Any) -> None:
-        """Alerta en línea si un objetivo pierde poder discriminativo.
-
-        Firma del fallo (observada en la corrida piloto): un objetivo
-        constante hace que la dominancia pierda fuerza y el frente se
-        infle hasta el 100% de la población, sin ningún error visible.
-        """
-        n = len(obj)
-        # (a) Frente = población completa
-        if result.n_pareto == n:
-            self._full_front_streak += 1
-            lvl = self.log.error if self._full_front_streak >= 3 else self.log.warning
-            lvl("DEGENERACIÓN? Frente de Pareto = %d/%d (100%% no dominados, "
-                "racha=%d gen). Firma típica de objetivo constante — revisa "
-                "evaluations.csv.", result.n_pareto, n, self._full_front_streak)
-        else:
-            self._full_front_streak = 0
-
-        # (b) Varianza ~0 por objetivo (excluyendo individuos penalizados)
-        signs = np.array([-1.0, 1.0, 1.0, 1.0])
-        penalty_vec = np.asarray(self.cfg.penalty_objectives, float) * signs
-        not_penalised = ~np.all(np.isclose(obj, penalty_vec), axis=1)
-        ok = obj[not_penalised]
-        for j, name in enumerate(OBJECTIVE_NAMES):
-            col = ok[:, j] if len(ok) else np.array([])
-            degenerate = (len(col) >= max(4, n // 4)
-                          and float(np.std(col)) < 1e-9)
-            if degenerate:
-                self._degen_streaks[name] += 1
-                streak = self._degen_streaks[name]
-                lvl = self.log.error if streak >= 3 else self.log.warning
-                lvl("OBJETIVO DEGENERADO: '%s' constante=%.6g en %d/%d "
-                    "individuos válidos (gen %d, racha=%d). La búsqueda está "
-                    "optimizando %d objetivos, no %d. stats: min=%.6g "
-                    "p50=%.6g max=%.6g std=%.3g",
-                    name, float(col[0]), len(col), n, gen, streak,
-                    N_OBJECTIVES - 1, N_OBJECTIVES,
-                    float(col.min()), float(np.median(col)),
-                    float(col.max()), float(col.std()))
-            else:
-                self._degen_streaks[name] = 0
 
     # ------------------------------------------------------------------
     def _finalize(self,
@@ -878,6 +666,23 @@ class SearchPipeline:
 
         valid_idx = np.where(valid_mask)[0]
         valid_obj = final_objectives[valid_idx]
+
+        # Detect inoperative objectives: a column that is constant across all
+        # valid individuals never influenced dominance. The typical cause is a
+        # measurement backend returning its penalty value for every candidate
+        # (e.g. energy_mj = penalty on a PC without a power sensor).
+        inoperative: list[str] = []
+        if len(valid_idx) > 1:
+            span = valid_obj.max(axis=0) - valid_obj.min(axis=0)
+            inoperative = [n for n, s in zip(OBJECTIVE_NAMES, span)
+                           if s <= 1e-12]
+            for name in inoperative:
+                self.log.warning(
+                    "Objective %r was CONSTANT across all valid individuals — "
+                    "it did not influence the search. Check the corresponding "
+                    "measurement backend before claiming multi-objective "
+                    "results on this axis.", name)
+
         local_pareto = compute_pareto_front(valid_obj)
         pareto_idx = valid_idx[local_pareto]
 
@@ -898,7 +703,9 @@ class SearchPipeline:
                  objectives=final_objectives)
 
         return {"pareto_indices": pareto_idx.tolist(),
-                "n_valid": int(valid_mask.sum())}
+                "n_valid": int(valid_mask.sum()),
+                "n_invalid": int((~valid_mask).sum()),
+                "inoperative_objectives": inoperative}
 
     # ------------------------------------------------------------------
     def run(self) -> dict[str, Any]:
@@ -908,36 +715,6 @@ class SearchPipeline:
         self.log.info("Config: %s", json.dumps(self.cfg.to_dict(),
                                                default=str, indent=2))
 
-        # ---- stale-output cleanup (skip when resuming or --keep-old) ----
-        if self.cfg.resume_from is not None:
-            self.log.info("Cleanup skipped: resume_from is set.")
-        elif self.cfg.keep_old:
-            self.log.info("Cleanup skipped: --keep-old requested.")
-        else:
-            _clean_previous_outputs(self.cfg.results_dir, self.log)
-
-        # ---- energy-backend probe (prevents a silently degenerate
-        #      energy objective like the energy_mj=9999 run) -------------
-        energy_source = self._probe_energy_backend()
-        if energy_source in ("noop", "error", "unknown"):
-            msg = (
-                "Energy meter backend is '%s' — the energy objective would "
-                "be a constant penalty (9999) and the search would degrade "
-                "to 3 objectives. Install 'nvidia-ml-py' (PC) or run on "
-                "Jetson (tegrastats). Use --allow-noop-energy to override."
-                % energy_source
-            )
-            if self.cfg.allow_noop_energy:
-                self.log.warning(msg)
-            else:
-                raise RuntimeError(msg)
-        else:
-            self.log.info("Energy meter backend OK: source=%s",
-                          energy_source)
-
-        # CAMBIO 6: snapshot de reproducibilidad (commit, stack, dataset).
-        self._write_run_metadata(energy_source)
-
         # Persist the resolved config alongside the results.
         (self.cfg.results_dir / "search_config.json").write_text(
             json.dumps(self.cfg.to_dict(), indent=2, default=str),
@@ -945,20 +722,33 @@ class SearchPipeline:
         )
 
         encoder, evaluator = self._build_components()
+        self._encoder = encoder
         mutation_prob = (self.cfg.mutation_prob
                          if self.cfg.mutation_prob is not None
                          else 1.0 / max(encoder.search_space.genome_length, 1))
         self.log.info("Genome length=%d, mutation_prob=%.4f",
                       encoder.search_space.genome_length, mutation_prob)
 
+        # Align the engine's penalty vector and hypervolume reference with
+        # the fitness penalty values. The engine defaults (e.g. 1000 mJ) are
+        # NOT dominated by a penalised fitness value (9999 mJ), which would
+        # corrupt the hypervolume indicator.
+        fc = self._fitness_config
+        penalty_vec = [-fc.penalty_auroc, fc.penalty_latency_ms,
+                       fc.penalty_ram_mb, fc.penalty_energy_mj]
+        hv_ref = (list(self.cfg.hv_reference)
+                  if self.cfg.hv_reference is not None else list(penalty_vec))
+        self.log.info("HV reference=%s, penalty=%s", hv_ref, penalty_vec)
+
         nsga_cfg = NSGA2Config(
             population_size=self.cfg.population_size,
             n_objectives=N_OBJECTIVES,
             crossover_prob=self.cfg.crossover_prob,
             mutation_rate=mutation_prob,
+            tournament_size=self.cfg.tournament_size,
+            hv_reference=hv_ref,
+            penalty_objectives=penalty_vec,
             seed=self.cfg.seed,
-            hv_reference=list(self.cfg.hv_reference),
-            penalty_objectives=list(self.cfg.penalty_objectives),
         )
 
         engine = NSGA2Engine(
@@ -984,17 +774,31 @@ class SearchPipeline:
                 "Current generation: %d. Target generations: %d. Remaining to run: %d",
                 engine.generation, self.cfg.n_generations, remaining_generations
             )
-            
+
+            # Guard: a resume that has nothing left to run must NOT silently
+            # overwrite final artifacts produced by the real search (this
+            # previously replaced a full run's Pareto front with a 0.02 s
+            # no-op re-finalisation lacking all measured metrics).
+            pareto_exists = (self.cfg.results_dir / "pareto_front.csv").is_file()
+            if (remaining_generations == 0 and pareto_exists
+                    and not self.cfg.force_finalize):
+                self.log.warning(
+                    "Checkpoint already at the target generation and final "
+                    "artifacts exist — skipping re-finalisation to protect "
+                    "them. Use --force-finalize to overwrite deliberately.")
+                return {"skipped": True,
+                        "reason": "already finalized at target generation",
+                        "n_generations": self.cfg.n_generations,
+                        "population_size": self.cfg.population_size}
+
             result = engine.run(
                 n_generations=remaining_generations,
                 on_generation_end=self._on_generation_end,
             )
         finally:
             self._history_writer.close()
-            self._eval_writer.close()
 
-        final_meta = [self._meta_for(engine.population[i])
-                      for i in range(len(engine.population))]
+        final_meta = self._population_meta(engine.population)
 
         summary = self._finalize(
             final_population=engine.population,
@@ -1036,11 +840,9 @@ def _build_argparser() -> argparse.ArgumentParser:
     p.add_argument("--n-workers", type=int, default=None)
     p.add_argument("--resume-from", type=Path, default=None)
     p.add_argument("--top-k", type=int, default=None)
-    p.add_argument("--keep-old", action="store_true",
-                   help="Do NOT delete artifacts from a previous run.")
-    p.add_argument("--allow-noop-energy", action="store_true",
-                   help="Run even if the energy meter has no real backend "
-                        "(objective degenerates to a constant penalty).")
+    p.add_argument("--force-finalize", action="store_true",
+                   help="Allow a 0-generation resume to overwrite existing "
+                        "final artifacts (pareto_front.csv, summary…).")
     p.add_argument("--quiet", action="store_true",
                    help="Reduce log verbosity to WARNING.")
     return p
@@ -1064,18 +866,16 @@ def _apply_cli_overrides(cfg: SearchConfig,
     for k, v in overrides.items():
         if v is not None:
             setattr(cfg, k, v)
-    if args.keep_old:
-        cfg.keep_old = True
-    if args.allow_noop_energy:
-        cfg.allow_noop_energy = True
+    if args.force_finalize:
+        cfg.force_finalize = True
     return cfg
 
 
 def main(argv: list[str] | None = None) -> int:
     args = _build_argparser().parse_args(argv)
 
-    config_found = args.config.is_file()
-    if config_found:
+    config_loaded = args.config.is_file()
+    if config_loaded:
         cfg = SearchConfig.from_file(args.config)
     else:
         # Allow running with pure CLI args + defaults if no config file exists.
@@ -1087,20 +887,13 @@ def main(argv: list[str] | None = None) -> int:
         log_path=log_path,
         level=logging.WARNING if args.quiet else logging.INFO,
     )
-    if not config_found:
+    if config_loaded:
+        logger.info("Loaded configuration from %s", args.config)
+    else:
         logger.warning(
-            "Config file %s NOT found — running with built-in defaults. "
-            "Pass --config or create the file to control the run.",
-            args.config,
-        )
-
-    # Full validation (including paths) AFTER CLI overrides: an invalid
-    # config must abort here, never start an expensive search.
-    try:
-        cfg.validate(check_paths=True)
-    except (ValueError, FileNotFoundError) as exc:
-        logger.error("Configuración inválida — búsqueda abortada: %s", exc)
-        return 2
+            "Config file %s NOT found — running with built-in defaults + CLI "
+            "flags. (This silent fallback previously masked a configs/ vs "
+            "config/ path typo.)", args.config)
 
     try:
         SearchPipeline(cfg, logger=logger).run()
@@ -1118,4 +911,3 @@ def main(argv: list[str] | None = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

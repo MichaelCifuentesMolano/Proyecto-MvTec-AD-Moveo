@@ -149,7 +149,7 @@ from src.evaluation.export_tables import (
 # Constants
 # ---------------------------------------------------------------------------
 PROJECT_ROOT: Path = Path(__file__).resolve().parent
-DEFAULT_CONFIG: Path = PROJECT_ROOT / "config" / "report.yaml"
+DEFAULT_CONFIG: Path = PROJECT_ROOT / "configs" / "report.yaml"
 DEFAULT_RESULTS_ROOT: Path = PROJECT_ROOT / "results"
 DEFAULT_REPORT_DIR: Path = DEFAULT_RESULTS_ROOT / "report"
 
@@ -933,8 +933,6 @@ def _build_argparser() -> argparse.ArgumentParser:
     p.add_argument("--no-deploy", action="store_true")
     p.add_argument("--no-tracking", action="store_true")
     p.add_argument("--top-k", type=int, default=None)
-    p.add_argument("--keep-old", action="store_true",
-                   help="Do NOT delete report files from a previous run.")
     p.add_argument("--quiet", action="store_true")
     return p
 
@@ -962,40 +960,10 @@ def _apply_cli_overrides(cfg: ReportConfig,
     return cfg
 
 
-def _clean_previous_outputs(cfg: ReportConfig,
-                            logger: logging.Logger) -> int:
-    """Delete report files from a previous run inside ``report_dir``.
-
-    Prevents stale figures/tables from surviving when a stage is excluded
-    in the new run. Log files are not removed.
-    """
-    n_removed = 0
-    stale = [
-        cfg.report_dir / cfg.pareto_png,
-        cfg.report_dir / cfg.convergence_png,
-        cfg.report_dir / cfg.boxplots_png,
-        cfg.report_dir / cfg.latex_tex,
-        cfg.report_dir / cfg.summary_pdf,
-        cfg.report_dir / cfg.summary_json,
-    ]
-    for f in stale:
-        try:
-            if f.is_file():
-                f.unlink()
-                n_removed += 1
-        except OSError as exc:
-            logger.warning("Could not remove stale file %s: %s", f, exc)
-    if n_removed:
-        logger.info("Cleanup: removed %d stale report file(s) "
-                    "(use --keep-old to disable).", n_removed)
-    return n_removed
-
-
 def main(argv: list[str] | None = None) -> int:
     args = _build_argparser().parse_args(argv)
-    config_found = args.config.is_file()
     cfg = (ReportConfig.from_file(args.config)
-           if config_found else ReportConfig())
+           if args.config.is_file() else ReportConfig())
     cfg = _apply_cli_overrides(cfg, args)
 
     log_path = cfg.report_dir / "report.log"
@@ -1003,17 +971,6 @@ def main(argv: list[str] | None = None) -> int:
         log_path=log_path,
         level=logging.WARNING if args.quiet else logging.INFO,
     )
-    if not config_found:
-        logger.warning(
-            "Config file %s NOT found — running with built-in defaults. "
-            "Pass --config or create the file to control the run.",
-            args.config,
-        )
-
-    if args.keep_old:
-        logger.info("Cleanup skipped: --keep-old requested.")
-    else:
-        _clean_previous_outputs(cfg, logger)
 
     try:
         ReportPipeline(cfg, logger=logger).run()

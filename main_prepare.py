@@ -41,9 +41,9 @@ Expected module interfaces (reasonable contract for downstream implementation)
         "summary": dict[str, dict[str, int]]}``.
 
 ``src.utils.set_seed``
-    ``set_seed(seed: int, deterministic: bool = True) -> dict``
-        Seeds python/numpy/torch (cuda included) and returns the applied
-        configuration dict for reproducibility logging.
+    ``set_seed(seed: int, *, deterministic_torch: bool = True) -> SeedState``
+        Seeds python/numpy/torch (cuda included) and returns a SeedState
+        dataclass documenting the applied configuration.
 
 ``src.utils.system_info``
     ``collect_system_info() -> dict``
@@ -64,13 +64,19 @@ Assumptions
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import logging
 import sys
 import time
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, is_dataclass
 from pathlib import Path
 from typing import Any
+
+try:
+    import yaml  # type: ignore
+except ImportError:  # pragma: no cover
+    yaml = None
 
 # ---------------------------------------------------------------------------
 # Project module imports (interfaces declared in the docstring above).
@@ -122,18 +128,55 @@ class PrepareConfig:
 
     force: bool = False
     skip_processed: bool = False
+    checksum: bool = True          # SHA-256 of the archive (cached by size+mtime)
 
     extra: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
-        """Serialize the config to a JSON-friendly dictionary."""
+        """Serialize the config to a JSON-friendly dictionary.
+
+        Paths are rendered relative to the project root when possible so
+        persisted artifacts stay portable across machines.
+        """
         d = asdict(self)
         for k, v in d.items():
             if isinstance(v, Path):
-                d[k] = str(v)
+                d[k] = _rel(v)
             elif isinstance(v, tuple):
                 d[k] = list(v)
         return d
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "PrepareConfig":
+        """Build a PrepareConfig from a plain dict, coercing typed fields."""
+        kwargs = dict(data)
+        for key in ("archive_path", "raw_dir", "processed_dir",
+                    "splits_dir", "results_dir"):
+            if key in kwargs and kwargs[key] is not None:
+                kwargs[key] = Path(kwargs[key])
+        if "expected_categories" in kwargs:
+            kwargs["expected_categories"] = tuple(kwargs["expected_categories"])
+        known = set(cls.__dataclass_fields__)
+        extra = {k: v for k, v in kwargs.items() if k not in known}
+        kwargs = {k: v for k, v in kwargs.items() if k in known}
+        cfg = cls(**kwargs)
+        if extra:
+            cfg.extra.update(extra)
+        return cfg
+
+    @classmethod
+    def from_file(cls, path: Path) -> "PrepareConfig":
+        """Load a PrepareConfig from a YAML or JSON file."""
+        if not path.is_file():
+            raise FileNotFoundError(f"Config file not found: {path}")
+        text = path.read_text(encoding="utf-8")
+        if path.suffix.lower() in {".yaml", ".yml"}:
+            if yaml is None:
+                raise RuntimeError("PyYAML is required to parse YAML configs.")
+            data = yaml.safe_load(text) or {}
+        else:
+            data = json.loads(text)
+        return cls.from_dict(data)
 
 
 # ---------------------------------------------------------------------------
@@ -183,6 +226,31 @@ def _write_json(path: Path, payload: dict[str, Any]) -> None:
     tmp.replace(path)
 
 
+def _rel(p: Path | str | None) -> str | None:
+    """Render a path relative to the project root when possible.
+
+    Persisted artifacts must not embed machine-specific absolute paths
+    (e.g. ``C:\\Users\\...``): they break portability of results between the
+    development PC and the embedded target.
+    """
+    if p is None:
+        return None
+    p = Path(p)
+    try:
+        return p.resolve().relative_to(PROJECT_ROOT).as_posix()
+    except ValueError:
+        return str(p)
+
+
+def _sha256_file(path: Path, chunk_mb: int = 8) -> str:
+    """Stream a SHA-256 digest of ``path``."""
+    h = hashlib.sha256()
+    with path.open("rb") as fh:
+        for chunk in iter(lambda: fh.read(chunk_mb * 1024 * 1024), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
 # ---------------------------------------------------------------------------
 # Pipeline class
 # ---------------------------------------------------------------------------
@@ -204,8 +272,11 @@ class PreparePipeline:
                       self.cfg.seed, self.cfg.deterministic)
         seed_info = set_seed(seed=self.cfg.seed,
                              deterministic_torch=self.cfg.deterministic)
-        self._record["stages"]["seed"] = seed_info
-        return seed_info
+        # set_seed returns a SeedState dataclass — serialise it so the
+        # reproducibility record survives in JSON form.
+        seed_dict = asdict(seed_info) if is_dataclass(seed_info) else dict(seed_info)
+        self._record["stages"]["seed"] = seed_dict
+        return seed_dict
 
     # -- stage 2 -----------------------------------------------------------
     def _stage_system_info(self) -> dict[str, Any]:
@@ -222,6 +293,55 @@ class PreparePipeline:
                 if k in info
             },
         }
+        return info
+
+    # -- stage 2b ----------------------------------------------------------
+    def _stage_checksum(self) -> dict[str, Any]:
+        """SHA-256 of the dataset archive, cached by (size, mtime).
+
+        Dataset *identity* — not just layout — must be verifiable for the
+        experiment record to be reproducible across machines.
+        """
+        archive = self.cfg.archive_path
+        info: dict[str, Any] = {"enabled": self.cfg.checksum,
+                                "archive": _rel(archive)}
+        if not self.cfg.checksum:
+            self.log.info("Archive checksum disabled (--no-checksum).")
+            self._record["stages"]["checksum"] = info
+            return info
+
+        stat = archive.stat()
+        cache_path = self.cfg.results_dir / "archive_checksum.json"
+        cached: dict[str, Any] = {}
+        if cache_path.is_file():
+            try:
+                cached = json.loads(cache_path.read_text(encoding="utf-8"))
+            except (json.JSONDecodeError, OSError):
+                cached = {}
+
+        if (cached.get("size_bytes") == stat.st_size
+                and cached.get("mtime") == int(stat.st_mtime)
+                and cached.get("sha256")):
+            self.log.info("Archive checksum (cached): sha256=%s",
+                          cached["sha256"])
+            info.update(cached)
+        else:
+            self.log.info("Computing SHA-256 of %s (%.1f MB) — one-time cost…",
+                          archive.name, stat.st_size / 2**20)
+            t0 = time.perf_counter()
+            digest = _sha256_file(archive)
+            info.update({
+                "sha256": digest,
+                "size_bytes": stat.st_size,
+                "mtime": int(stat.st_mtime),
+                "hash_seconds": round(time.perf_counter() - t0, 1),
+            })
+            _write_json(cache_path, {k: v for k, v in info.items()
+                                     if k != "enabled"})
+            self.log.info("Archive sha256=%s (%.1f s)",
+                          digest, info["hash_seconds"])
+
+        self._record["stages"]["checksum"] = info
         return info
 
     # -- stage 3 -----------------------------------------------------------
@@ -265,9 +385,13 @@ class PreparePipeline:
             issues = report.get("issues", [])
             for issue in issues:
                 self.log.error("Validation issue: %s", issue)
+            # Persist the failure report BEFORE raising, so the referenced
+            # file actually exists when the operator goes looking for it.
+            fail_path = self.cfg.results_dir / "validation_failure.json"
+            _write_json(fail_path, report)
             raise RuntimeError(
                 f"Dataset validation failed with {len(issues)} issue(s). "
-                "Inspect results/dataset_summary.json for details."
+                f"Inspect {_rel(fail_path)} for details."
             )
         self.log.info(
             "Validation OK — %d categories, train=%d, test=%d, masks=%d",
@@ -310,6 +434,7 @@ class PreparePipeline:
 
         self._stage_seed()
         self._stage_system_info()
+        checksum_info = self._stage_checksum()
         extract_result = self._stage_extract()
         validate_report = self._stage_validate()
         splits_result = self._stage_build_splits()
@@ -320,9 +445,16 @@ class PreparePipeline:
         summary = self._build_summary(extract_result,
                                       validate_report,
                                       splits_result)
+        summary["archive_sha256"] = checksum_info.get("sha256")
         out_path = self.cfg.results_dir / "dataset_summary.json"
         _write_json(out_path, summary)
         self.log.info("Dataset summary written to %s", out_path)
+
+        # Persist the FULL stage record (seeding state included) — it was
+        # previously built and then discarded.
+        record_path = self.cfg.results_dir / "prepare_record.json"
+        _write_json(record_path, self._record)
+        self.log.info("Full preparation record written to %s", record_path)
 
         self.log.info("=== Pipeline finished in %.2f s ===", elapsed)
         return self._record
@@ -333,11 +465,14 @@ class PreparePipeline:
                        validate_report: dict[str, Any],
                        splits_result: dict[str, Any]) -> dict[str, Any]:
         """Compose the persisted dataset_summary.json payload."""
+        # NOTE: all paths are stored relative to the project root so that the
+        # artifacts remain valid when results move between the development PC
+        # and the embedded target.
         return {
             "config": self.cfg.to_dict(),
             "extract": {
-                "raw_root": str(extract_result.get("raw_root",
-                                                   self.cfg.raw_dir)),
+                "raw_root": _rel(extract_result.get("raw_root",
+                                                    self.cfg.raw_dir)),
                 "n_files_extracted": extract_result.get("n_files_extracted", 0),
                 "skipped": bool(extract_result.get("skipped", False)),
                 "categories": extract_result.get("categories", []),
@@ -350,8 +485,8 @@ class PreparePipeline:
                 "issues": validate_report.get("issues", []),
             },
             "splits": {
-                "splits_dir": str(splits_result.get("splits_dir",
-                                                    self.cfg.splits_dir)),
+                "splits_dir": _rel(splits_result.get("splits_dir",
+                                                     self.cfg.splits_dir)),
                 "per_category": splits_result.get("summary", {}),
             },
             "elapsed_seconds": self._record.get("elapsed_seconds"),
@@ -366,14 +501,17 @@ def _build_argparser() -> argparse.ArgumentParser:
         description=("Prepare the MVTec AD dataset, environment, metadata, "
                      "splits, and reproducibility artifacts."),
     )
-    p.add_argument("--archive", type=Path, default=DEFAULT_ARCHIVE,
+    p.add_argument("--config", type=Path, default=None,
+                   help="Optional YAML/JSON config file (flat PrepareConfig "
+                        "keys). CLI flags override individual fields.")
+    p.add_argument("--archive", type=Path, default=None,
                    help="Path to mvtec_anomaly_detection.tar.xz")
-    p.add_argument("--raw-dir", type=Path, default=DEFAULT_RAW_DIR)
-    p.add_argument("--processed-dir", type=Path, default=DEFAULT_PROCESSED_DIR)
-    p.add_argument("--splits-dir", type=Path, default=DEFAULT_SPLITS_DIR)
-    p.add_argument("--results-dir", type=Path, default=DEFAULT_RESULTS_DIR)
-    p.add_argument("--seed", type=int, default=42)
-    p.add_argument("--val-ratio", type=float, default=0.15)
+    p.add_argument("--raw-dir", type=Path, default=None)
+    p.add_argument("--processed-dir", type=Path, default=None)
+    p.add_argument("--splits-dir", type=Path, default=None)
+    p.add_argument("--results-dir", type=Path, default=None)
+    p.add_argument("--seed", type=int, default=None)
+    p.add_argument("--val-ratio", type=float, default=None)
     p.add_argument("--no-deterministic", action="store_true",
                    help="Disable deterministic CUDA/cuDNN flags")
     p.add_argument("--no-stratify", action="store_true",
@@ -382,65 +520,44 @@ def _build_argparser() -> argparse.ArgumentParser:
                    help="Re-extract and overwrite existing artifacts")
     p.add_argument("--skip-processed", action="store_true",
                    help="Do not generate processed-image variants")
+    p.add_argument("--no-checksum", action="store_true",
+                   help="Skip the SHA-256 integrity hash of the archive")
     p.add_argument("--log-file", type=Path, default=None,
                    help="Optional log file path (default: results/prepare.log)")
-    p.add_argument("--keep-old", action="store_true",
-                   help="Do NOT delete summaries/split manifests from a "
-                        "previous prepare run.")
     p.add_argument("--quiet", action="store_true",
                    help="Reduce log verbosity to WARNING")
     return p
 
 
 def _config_from_args(args: argparse.Namespace) -> PrepareConfig:
-    return PrepareConfig(
-        archive_path=args.archive,
-        raw_dir=args.raw_dir,
-        processed_dir=args.processed_dir,
-        splits_dir=args.splits_dir,
-        results_dir=args.results_dir,
-        seed=args.seed,
-        deterministic=not args.no_deterministic,
-        val_ratio=args.val_ratio,
-        stratify_by_defect=not args.no_stratify,
-        force=args.force,
-        skip_processed=args.skip_processed,
-    )
+    """Build the config: file (if given) < CLI overrides < flags."""
+    cfg = (PrepareConfig.from_file(args.config)
+           if args.config is not None else PrepareConfig())
 
+    overrides = {
+        "archive_path": args.archive,
+        "raw_dir": args.raw_dir,
+        "processed_dir": args.processed_dir,
+        "splits_dir": args.splits_dir,
+        "results_dir": args.results_dir,
+        "seed": args.seed,
+        "val_ratio": args.val_ratio,
+    }
+    for k, v in overrides.items():
+        if v is not None:
+            setattr(cfg, k, v)
 
-def _clean_previous_outputs(cfg: PrepareConfig,
-                            logger: logging.Logger,
-                            clean_splits: bool) -> int:
-    """Delete summaries (always) and split manifests (only with --force)
-    from a previous prepare run.
-
-    Split manifests are only wiped together with ``--force`` because every
-    downstream stage (search/retrain/deploy) depends on them: regenerating
-    them with a different seed invalidates previous results. The raw and
-    processed image trees are governed by ``--force``/``--skip-processed``
-    and are never touched here. Log files are not removed.
-    """
-    n_removed = 0
-    stale: list[Path] = [
-        cfg.results_dir / "dataset_summary.json",
-        cfg.results_dir / "dataset_validation.json",
-        cfg.results_dir / "system_info.json",
-    ]
-    if clean_splits and cfg.splits_dir.is_dir():
-        stale += sorted(cfg.splits_dir.glob("*.json"))
-        stale += sorted(cfg.splits_dir.glob("*.csv"))
-        stale += sorted(cfg.splits_dir.rglob("_cross_category/*.*"))
-    for f in stale:
-        try:
-            if f.is_file():
-                f.unlink()
-                n_removed += 1
-        except OSError as exc:
-            logger.warning("Could not remove stale file %s: %s", f, exc)
-    if n_removed:
-        logger.info("Cleanup: removed %d stale artifact(s) from previous "
-                    "prepare run (use --keep-old to disable).", n_removed)
-    return n_removed
+    if args.no_deterministic:
+        cfg.deterministic = False
+    if args.no_stratify:
+        cfg.stratify_by_defect = False
+    if args.force:
+        cfg.force = True
+    if args.skip_processed:
+        cfg.skip_processed = True
+    if args.no_checksum:
+        cfg.checksum = False
+    return cfg
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -452,11 +569,6 @@ def main(argv: list[str] | None = None) -> int:
         log_path=log_path,
         level=logging.WARNING if args.quiet else logging.INFO,
     )
-
-    if args.keep_old:
-        logger.info("Cleanup skipped: --keep-old requested.")
-    else:
-        _clean_previous_outputs(cfg, logger, clean_splits=cfg.force)
 
     try:
         pipeline = PreparePipeline(cfg, logger=logger)

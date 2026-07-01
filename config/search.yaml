@@ -1,55 +1,85 @@
 # config/search.yaml
 # ===================
-# NSGA-II multi-objective architecture + quantization search (main_search.py).
+# NSGA-II multi-objective neural architecture + quantization search.
 #
-# IMPORTANT: this file is FLAT and mirrors the SearchConfig dataclass in
-# main_search.py one-to-one. Nested keys are NOT read (they fall into
-# `extra` and are ignored). The previous nested version of this file lives
-# in config/legacy/ and was never actually loaded by the code.
+# SCHEMA: flat keys matching main_search.SearchConfig. The old nested schema
+# (algorithm:/operators:/…) is still parsed for backwards compatibility, but
+# this file is the ground truth actually consumed by main_search.py.
 #
-# Objectives (fixed in code): neg_auroc, latency_ms, peak_ram_mb, energy_mj.
+# Objectives (all minimised internally — signs applied by the engine):
+#   neg_auroc     : -AUROC  (maximise AUROC)
+#   latency_ms    : warm inference latency on the target device
+#   peak_ram_mb   : peak resident memory during inference
+#   energy_mj     : energy per inference (power x latency integration)
 
-# --- I/O -------------------------------------------------------------------
-splits_dir: "data/splits"
-results_dir: "results/search"
-category: "bottle"
+# ── I/O ───────────────────────────────────────────────────────────────────
+splits_dir:  data/splits
+results_dir: results/search
+category:    bottle            # MVTec AD category to optimise for.
 
-# --- Reproducibility -------------------------------------------------------
+# ── Reproducibility ──────────────────────────────────────────────────────
 seed: 42
 
-# --- NSGA-II hyperparameters ----------------------------------------------
-population_size: 32        # must be even
-n_generations: 30
-crossover_prob: 0.9
-mutation_prob: null        # null -> 1/genome_length (= 1/48)
-eta_c: 15.0                # UNUSED: the integer-genome engine uses
-eta_m: 20.0                # single-point crossover + random-reset mutation
+# ── NSGA-II hyperparameters ──────────────────────────────────────────────
+population_size: 40
+n_generations:   50
+crossover_prob:  0.90
+mutation_prob:   null          # null -> 1 / genome_length
+tournament_size: 2
 
-# Hypervolume reference point [neg_auroc, latency_ms, peak_ram_mb, energy_mj].
-# Must be WORSE than every feasible measurement (otherwise valid points add
-# zero HV — this silently happened in the pilot run). Penalised evaluations
-# (9999/65536) fall outside on purpose. Calibrate after gen 1 with
-# results/search/evaluations.csv.
-hv_reference: [0.0, 1000.0, 8192.0, 5000.0]
+# Hypervolume reference point (neg_auroc, latency_ms, peak_ram_mb, energy_mj).
+# null -> derived from the fitness penalty values (guaranteed dominated).
+hv_reference: null
 
-# Engine penalty vector for failed evaluations (aligned with FitnessConfig).
-penalty_objectives: [0.0, 9999.0, 65536.0, 9999.0]
+# ── Compute / runtime ────────────────────────────────────────────────────
+device: cuda                   # falls back to cpu with a warning if no CUDA
+n_workers: 1                   # engine evaluates serially; >1 only warns
+top_k: 5
 
-# --- Search space / fitness overrides (free-form dicts) --------------------
-# Keys here are forwarded to SearchSpaceConfig / FitnessConfig downstream.
-search_space: {}
-fitness: {}
+# ── Resume ───────────────────────────────────────────────────────────────
+resume_from: null              # e.g. results/search/latest_checkpoint
+force_finalize: false          # protect final artifacts on 0-gen resumes
 
-# --- Compute ----------------------------------------------------------------
-device: "cuda"
-n_workers: 1
-top_k: 5                   # candidates exported to best_candidates.json
+# ── Search space (must match src.nas.search_space dataclasses) ───────────
+search_space:
+  arch:
+    families:    [autoencoder, unet, feature_recon, student_teacher, patch_cnn]
+    input_sizes: [128, 192, 224, 256]
+    channels:    [16, 24, 32, 48, 64, 96, 128, 192, 256]
+    kernels:     [3, 5, 7]
+    blocks:      [conv, ds, ir]
+    bottlenecks: [0.5, 1.0, 2.0, 4.0, 6.0]
+    attentions:  [none, se, eca, spatial, cbam]
+    min_stages:  2
+    max_stages:  5
+  quant:
+    weight_bits: [4, 6, 8]
+    act_bits:    [4, 6, 8]
+    allow_mixed_precision: true
+    allow_asymmetric:      true
+    allow_per_channel:     true
 
-# --- Resume -----------------------------------------------------------------
-# Path to latest_checkpoint (without suffix) or final_population.npz; null = fresh run.
-resume_from: null
+# ── Fitness evaluator (must match src.nas.fitness.FitnessConfig) ─────────
+fitness:
+  eval_split: test
 
-# --- Run hygiene / safety ---------------------------------------------------
-keep_old: false            # true -> do NOT delete outputs from a previous run
-allow_noop_energy: false   # true -> tolerate a missing energy backend (NOT
-                           # recommended: the energy objective degenerates)
+  # Quick training during search (small budget; full retrain happens later).
+  n_search_epochs:   5
+  max_train_samples: 500
+  search_batch_size: 8
+  search_lr:         1.0e-3
+
+  # Hardware profiling.
+  n_profiling_warmup: 10
+  n_profiling_iters:  30
+  # Energy backend: "auto" | "tegrastats" | "sysfs" | "nvml" | "noop".
+  #   PC with NVIDIA GPU -> nvml  (pip install pynvml)
+  #   Jetson             -> auto  (tegrastats / sysfs)
+  energy_backend: nvml
+
+  # Hard constraints.
+  max_params_m: 20.0
+
+  # Timeouts (seconds).
+  train_timeout_seconds:   600.0
+  profile_timeout_seconds: 120.0

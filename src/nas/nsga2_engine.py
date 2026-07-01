@@ -62,28 +62,6 @@ import numpy as np
 from src.nas.search_space import GENOME_LENGTH, SearchSpace
 from src.nas.encoding import GenomeEncoder
 
-import hashlib
-from src.nas import search_space as _ss_mod
-
-
-def search_space_hash() -> str:
-    """Deterministic fingerprint of the ACTIVE search-space definition.
-
-    Genes are indices into option lists, so two checkpoints are only
-    compatible if every list (and the genome geometry) is identical. Any
-    edit to the lists silently re-interprets old genomes as different
-    architectures — this hash makes that incompatibility detectable.
-    """
-    sig = repr((
-        _ss_mod.ARCH_FAMILIES, _ss_mod.ARCH_INPUT_SIZES,
-        _ss_mod.ARCH_CHANNELS, _ss_mod.ARCH_KERNELS,
-        _ss_mod.ARCH_BLOCKS, _ss_mod.ARCH_BOTTLENECKS,
-        _ss_mod.ARCH_ATTENTIONS, _ss_mod.QUANT_BITS,
-        _ss_mod.MIN_STAGES, _ss_mod.MAX_STAGES, GENOME_LENGTH,
-    ))
-    return hashlib.sha256(sig.encode("utf-8")).hexdigest()[:16]
-
-
 __all__ = [
     "NSGA2Config",
     "GenerationResult",
@@ -918,13 +896,6 @@ class NSGA2Engine:
         meta = {
             "generation":  self._generation,
             "config":      self._cfg.to_dict(),
-            # --- compatibility guards (validated at load time) ---
-            "genome_length":   int(self._population.shape[1]),
-            "population_size": int(self._population.shape[0]),
-            "search_space_hash": search_space_hash(),
-            # Full numpy RNG state: a resumed run continues the SAME random
-            # stream instead of silently diverging from an uninterrupted one.
-            "rng_state": self._rng.bit_generator.state,
             "history":     [
                 {k: v for k, v in vars(r).items()} for r in self._history
             ],
@@ -947,63 +918,13 @@ class NSGA2Engine:
         self._population = arrays["population"].astype(np.int32)
         self._objectives = arrays["objectives"].astype(np.float64)
 
-        # ---- hard structural guards (always enforceable) -----------------
-        if self._population.shape[1] != GENOME_LENGTH:
-            raise RuntimeError(
-                f"Checkpoint incompatible: genome_length="
-                f"{self._population.shape[1]} en el checkpoint vs "
-                f"{GENOME_LENGTH} en el código actual. Reanudar mezclaría "
-                "dos espacios de búsqueda distintos. Inicia una corrida "
-                "nueva o restaura la versión del código que lo generó.")
-        if self._objectives.shape[1] != self._cfg.n_objectives:
-            raise RuntimeError(
-                f"Checkpoint incompatible: n_objectives="
-                f"{self._objectives.shape[1]} vs {self._cfg.n_objectives}.")
-
         meta_path = p.parent / (p.name + ".json")
         if meta_path.is_file():
             meta = json.loads(meta_path.read_text(encoding="utf-8"))
-
-            # ---- metadata guards (checkpoints nuevos los traen) ----------
-            ck_hash = meta.get("search_space_hash")
-            if ck_hash is not None and ck_hash != search_space_hash():
-                raise RuntimeError(
-                    "Checkpoint incompatible: el ESPACIO DE BÚSQUEDA cambió "
-                    f"desde que se guardó (hash {ck_hash} vs "
-                    f"{search_space_hash()}). Los genomas son índices en "
-                    "listas de opciones: reanudar re-interpretaría genomas "
-                    "viejos como arquitecturas distintas SIN error visible. "
-                    "Prohibido reanudar.")
-            ck_pop = meta.get("population_size")
-            if ck_pop is not None and int(ck_pop) != self._cfg.population_size:
-                raise RuntimeError(
-                    f"Checkpoint incompatible: population_size={ck_pop} en el "
-                    f"checkpoint vs {self._cfg.population_size} en la config "
-                    "actual. Ajusta la config o inicia una corrida nueva.")
-            ck_gl = meta.get("genome_length")
-            if ck_gl is not None and int(ck_gl) != GENOME_LENGTH:
-                raise RuntimeError(
-                    f"Checkpoint incompatible: genome_length={ck_gl} vs "
-                    f"{GENOME_LENGTH}.")
-            if ck_hash is None:
-                LOG.warning(
-                    "Checkpoint legacy sin metadatos de compatibilidad "
-                    "(anterior a las guardas): no se puede verificar el "
-                    "espacio de búsqueda. Continúa bajo tu responsabilidad.")
-
             self._generation = int(meta.get("generation", 0))
             self._history    = [
                 GenerationResult(**r) for r in meta.get("history", [])
             ]
-            # Restore the RNG stream so resumed == uninterrupted.
-            rng_state = meta.get("rng_state")
-            if rng_state is not None:
-                try:
-                    self._rng.bit_generator.state = rng_state
-                    LOG.info("RNG state restaurado desde el checkpoint.")
-                except Exception as exc:  # noqa: BLE001
-                    LOG.warning("No se pudo restaurar el estado RNG: %s "
-                                "(la reanudación usará un stream nuevo).", exc)
         LOG.info("Checkpoint loaded <- %s (gen=%d)", p, self._generation)
 
     # ------------------------------------------------------------------

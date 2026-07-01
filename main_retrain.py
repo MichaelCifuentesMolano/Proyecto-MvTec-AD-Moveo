@@ -126,7 +126,7 @@ DEFAULT_SEARCH_RESULTS: Path = PROJECT_ROOT / "results" / "search"
 DEFAULT_RESULTS_DIR: Path = PROJECT_ROOT / "results" / "retrain"
 DEFAULT_CHECKPOINTS_DIR: Path = PROJECT_ROOT / "checkpoints" / "final_models"
 DEFAULT_SPLITS_DIR: Path = PROJECT_ROOT / "data" / "splits"
-DEFAULT_CONFIG: Path = PROJECT_ROOT / "config" / "retrain.yaml"
+DEFAULT_CONFIG: Path = PROJECT_ROOT / "configs" / "retrain.yaml"
 
 # Columns guaranteed to be present in final_metrics.csv (extra metrics are
 # accepted and serialized as JSON).
@@ -505,13 +505,6 @@ class RetrainPipeline:
                                  cid, exc)
 
         # ---- final validation -------------------------------------------
-        # Evaluate at the SAME resolution used for training (the genome's
-        # input_size, like train_loop does). Without this, a candidate with
-        # input_size=256 was trained at 256 but evaluated at the 224
-        # default, biasing val/test AUROC.
-        arch_spec = (config.get("arch_spec", {})
-                     if isinstance(config, dict) else {})
-        eval_image_size = int(arch_spec.get("input_size", 224))
         try:
             val_metrics = validate_model(
                 model=model,
@@ -519,7 +512,6 @@ class RetrainPipeline:
                 category=self.cfg.category,
                 device=self.cfg.device,
                 split="val",
-                image_size=eval_image_size,
             )
         except Exception as exc:  # noqa: BLE001
             self.log.exception("[%s] validation failed", cid)
@@ -535,7 +527,6 @@ class RetrainPipeline:
                 splits_dir=self.cfg.splits_dir,
                 category=self.cfg.category,
                 device=self.cfg.device,
-                image_size=eval_image_size,
             )
         except Exception as exc:  # noqa: BLE001
             self.log.exception("[%s] test metrics failed", cid)
@@ -718,9 +709,6 @@ def _build_argparser() -> argparse.ArgumentParser:
                    choices=[None, "cpu", "cuda"])
     p.add_argument("--no-skip-existing", action="store_true",
                    help="Re-train even if a checkpoint already exists.")
-    p.add_argument("--keep-old", action="store_true",
-                   help="Do NOT delete metrics/checkpoints from a previous "
-                        "run (cleanup only happens with --no-skip-existing).")
     p.add_argument("--fail-fast", action="store_true")
     p.add_argument("--quiet", action="store_true")
     return p
@@ -750,43 +738,10 @@ def _apply_cli_overrides(cfg: RetrainConfig,
     return cfg
 
 
-def _clean_previous_outputs(cfg: RetrainConfig,
-                            logger: logging.Logger) -> int:
-    """Delete metric files and checkpoints from a previous retrain run.
-
-    Only invoked for FRESH runs (``skip_existing=False`` and not
-    ``--keep-old``), so old and new results are never mixed. Log files are
-    not removed (the logger keeps an open handle).
-    """
-    n_removed = 0
-    stale_files = [
-        cfg.results_dir / "final_metrics.csv",
-        cfg.results_dir / "model_ranked.csv",
-        cfg.results_dir / "retrain_summary.json",
-        cfg.results_dir / "retrain_config.json",
-    ]
-    stale_files += sorted(cfg.checkpoints_dir.glob("*.pt"))
-    log_dir = cfg.results_dir / "logs"
-    if log_dir.is_dir():
-        stale_files += sorted(log_dir.rglob("*.*"))
-    for f in stale_files:
-        try:
-            if f.is_file():
-                f.unlink()
-                n_removed += 1
-        except OSError as exc:
-            logger.warning("Could not remove stale file %s: %s", f, exc)
-    if n_removed:
-        logger.info("Cleanup: removed %d stale artifact(s) from previous "
-                    "retrain run (use --keep-old to disable).", n_removed)
-    return n_removed
-
-
 def main(argv: list[str] | None = None) -> int:
     args = _build_argparser().parse_args(argv)
-    config_found = args.config.is_file()
     cfg = (RetrainConfig.from_file(args.config)
-           if config_found else RetrainConfig())
+           if args.config.is_file() else RetrainConfig())
     cfg = _apply_cli_overrides(cfg, args)
 
     log_path = cfg.results_dir / "retrain.log"
@@ -794,20 +749,6 @@ def main(argv: list[str] | None = None) -> int:
         log_path=log_path,
         level=logging.WARNING if args.quiet else logging.INFO,
     )
-    if not config_found:
-        logger.warning(
-            "Config file %s NOT found — running with built-in defaults. "
-            "Pass --config or create the file to control the run.",
-            args.config,
-        )
-
-    # Fresh run -> wipe previous metrics/checkpoints. When skip_existing is
-    # active the user explicitly wants to reuse checkpoints, so keep them.
-    if not cfg.skip_existing and not args.keep_old:
-        _clean_previous_outputs(cfg, logger)
-    elif cfg.skip_existing:
-        logger.info("Cleanup skipped: skip_existing=True reuses previous "
-                    "checkpoints (pass --no-skip-existing for a fresh run).")
 
     try:
         RetrainPipeline(cfg, logger=logger).run()
