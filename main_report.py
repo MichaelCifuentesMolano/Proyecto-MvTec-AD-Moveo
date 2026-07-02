@@ -124,32 +124,150 @@ except ImportError:  # pragma: no cover
 
 
 # ---------------------------------------------------------------------------
-# Project module imports (interfaces declared in the docstring above).
+# NOTE: the idealized interfaces this script previously imported
+# (summarize_*, plot_pareto/plot_convergence/plot_boxplots, to_latex_table,
+# export_latex_bundle, export_pdf_summary) were never implemented under
+# src.evaluation — the script could not even be imported. The report is now
+# self-contained: summaries are computed here with pandas, plots/LaTeX/PDF
+# use the built-in fallback renderers, and statistical comparisons use scipy
+# when available.
 # ---------------------------------------------------------------------------
-from src.evaluation.statistics import (
-    summarize_search,
-    summarize_retrain,
-    summarize_deploy,
-    summarize_tracking,
-    compare_groups,
-)
-from src.evaluation.plots import (
-    plot_pareto,
-    plot_convergence,
-    plot_boxplots,
-)
-from src.evaluation.export_tables import (
-    to_latex_table,
-    export_latex_bundle,
-    export_pdf_summary,
-)
+try:
+    from scipy import stats as _scistats  # type: ignore
+except ImportError:  # pragma: no cover
+    _scistats = None
+
+
+# ---------------------------------------------------------------------------
+# Self-contained statistical summaries
+# ---------------------------------------------------------------------------
+def _describe(df: "pd.DataFrame | None",
+              cols: list[str]) -> dict[str, dict[str, float]]:
+    out: dict[str, dict[str, float]] = {}
+    if df is None:
+        return out
+    for c in cols:
+        if c not in df.columns:
+            continue
+        s = pd.to_numeric(df[c], errors="coerce").dropna()
+        if not len(s):
+            continue
+        out[c] = {"n": int(len(s)), "mean": float(s.mean()),
+                  "std": float(s.std(ddof=1)) if len(s) > 1 else 0.0,
+                  "min": float(s.min()), "median": float(s.median()),
+                  "max": float(s.max())}
+    return out
+
+
+def summarize_search(history: "pd.DataFrame | None",
+                     pareto: "pd.DataFrame | None",
+                     objectives: list[str],
+                     generations: "pd.DataFrame | None" = None) -> dict:
+    out: dict[str, Any] = {}
+    if generations is not None and len(generations):
+        out["per_generation"] = generations.to_dict("records")
+    if history is not None and len(history):
+        out["n_evaluations"] = int(len(history))
+        if "valid" in history.columns:
+            out["valid_rate"] = float(
+                history["valid"].astype(str).str.lower().eq("true").mean())
+        out["descriptive"] = _describe(history, objectives)
+    if pareto is not None and len(pareto):
+        out["final_pareto"] = {"n": int(len(pareto)),
+                               "descriptive": _describe(pareto, objectives)}
+    return out
+
+
+def summarize_retrain(metrics: "pd.DataFrame | None",
+                      ranked: "pd.DataFrame | None") -> dict:
+    out: dict[str, Any] = {}
+    if metrics is None or not len(metrics):
+        return out
+    ok = metrics[metrics["status"].astype(str).str.startswith("ok")] \
+        if "status" in metrics.columns else metrics
+    out["n_candidates"] = int(len(metrics))
+    out["n_ok"] = int(len(ok))
+    out["descriptive"] = _describe(
+        ok, ["test_auroc", "test_auprc", "test_f1",
+             "val_auroc", "train_seconds", "best_epoch"])
+    if ranked is not None and len(ranked):
+        out["best"] = ranked.iloc[0].to_dict()
+    return out
+
+
+def summarize_deploy(runtime: "pd.DataFrame | None",
+                     ranked: "pd.DataFrame | None") -> dict:
+    out: dict[str, Any] = {}
+    if runtime is None or not len(runtime):
+        return out
+    ok = runtime[runtime["status"].astype(str).str.startswith("ok")] \
+        if "status" in runtime.columns else runtime
+    out["n_artifacts"] = int(len(runtime))
+    out["n_ok"] = int(len(ok))
+    cols = ["latency_ms_mean", "latency_ms_p95", "latency_ms_p99",
+            "throughput_fps", "energy_mj_per_inf", "peak_ram_mb",
+            "on_device_auroc"]
+    out["descriptive"] = _describe(ok, cols)
+    if "precision" in ok.columns:
+        out["per_precision"] = {
+            str(p): _describe(g, cols)
+            for p, g in ok.groupby("precision")
+        }
+    if ranked is not None and len(ranked):
+        out["best"] = ranked.iloc[0].to_dict()
+    return out
+
+
+def summarize_tracking(metrics: "pd.DataFrame | None",
+                       failures: "pd.DataFrame | None") -> dict:
+    out: dict[str, Any] = {}
+    if metrics is None or not len(metrics):
+        return out
+    cols = ["achieved_fps", "detection_latency_ms_p95",
+            "end_to_end_latency_ms_p95", "tracker_success_rate",
+            "n_lost", "mean_iou", "mean_tracking_error_px",
+            "energy_mj_per_frame", "control_saturation_rate"]
+    out["n_sessions"] = int(len(metrics))
+    out["descriptive"] = _describe(metrics, cols)
+    if "scenario" in metrics.columns:
+        out["per_scenario"] = {
+            str(s): _describe(g, cols)
+            for s, g in metrics.groupby("scenario")
+        }
+    if failures is not None and len(failures) and \
+            "failure_type" in failures.columns:
+        out["failures_by_type"] = (
+            failures["failure_type"].value_counts().to_dict())
+    return out
+
+
+def compare_groups(values_by_group: dict[str, list[float]],
+                   test: str = "mannwhitney") -> dict:
+    """Pairwise nonparametric comparison across groups (scipy-backed)."""
+    if _scistats is None:
+        return {"error": "scipy not installed — pip install scipy"}
+    names = list(values_by_group.keys())
+    pairs: dict[str, dict[str, float]] = {}
+    for i in range(len(names)):
+        for j in range(i + 1, len(names)):
+            a, b = values_by_group[names[i]], values_by_group[names[j]]
+            try:
+                stat, p = _scistats.mannwhitneyu(a, b,
+                                                 alternative="two-sided")
+                pairs[f"{names[i]} vs {names[j]}"] = {
+                    "U": float(stat), "p_value": float(p),
+                    "n_a": len(a), "n_b": len(b)}
+            except ValueError as exc:
+                pairs[f"{names[i]} vs {names[j]}"] = {"error": str(exc)}
+    return {"test": test, "pairs": pairs}
 
 
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
 PROJECT_ROOT: Path = Path(__file__).resolve().parent
-DEFAULT_CONFIG: Path = PROJECT_ROOT / "configs" / "report.yaml"
+# ``config/`` (singular) — ``configs/`` silently fell back to defaults.
+DEFAULT_CONFIG: Path = PROJECT_ROOT / "config" / "report.yaml"
 DEFAULT_RESULTS_ROOT: Path = PROJECT_ROOT / "results"
 DEFAULT_REPORT_DIR: Path = DEFAULT_RESULTS_ROOT / "report"
 
@@ -191,8 +309,10 @@ class ReportConfig:
     # Plot / table behavior
     objectives: tuple[str, ...] = OBJECTIVES
     pareto_axes: tuple[str, str] = ("latency_ms", "neg_auroc")
+    # Column names must exist in results/search/generations.csv
+    # (written per generation by main_search.py).
     convergence_metrics: tuple[str, ...] = (
-        "best_neg_auroc", "median_latency_ms", "hypervolume",
+        "hypervolume", "best_auroc", "best_latency_ms", "n_pareto",
     )
     boxplot_columns: tuple[str, ...] = (
         "latency_ms_p95", "energy_mj_per_inf",
@@ -339,6 +459,7 @@ def _load_search(cfg: ReportConfig,
     s = StageData(name="search", path=base)
     s.frames["history"] = _read_csv_safe(base / "history.csv", logger)
     s.frames["pareto"] = _read_csv_safe(base / "pareto_front.csv", logger)
+    s.frames["generations"] = _read_csv_safe(base / "generations.csv", logger)
     s.json_blobs["best"] = _read_json_safe(
         base / "best_candidates.json", logger,
     ) or {}
@@ -448,6 +569,7 @@ class ReportPipeline:
                     history=s["search"].frames.get("history"),
                     pareto=s["search"].frames.get("pareto"),
                     objectives=list(self.cfg.objectives),
+                    generations=s["search"].frames.get("generations"),
                 )
             except Exception as exc:  # noqa: BLE001
                 self.log.exception("summarize_search failed")
@@ -512,38 +634,21 @@ class ReportPipeline:
                      if "search" in self._stages else None)
         if pareto_df is not None and len(pareto_df):
             out = self.cfg.report_dir / self.cfg.pareto_png
-            try:
-                self._artifacts["pareto_png"] = plot_pareto(
-                    pareto=pareto_df,
-                    output_path=out,
-                    objectives=list(self.cfg.objectives),
-                    history=self._stages["search"].frames.get("history"),
-                    title="NSGA-II Pareto Front",
-                )
+            self._artifacts["pareto_png"] = self._fallback_scatter_pareto(
+                pareto_df, out,
+            )
+            if self._artifacts["pareto_png"]:
                 self.log.info("Pareto plot -> %s", out)
-            except Exception:  # noqa: BLE001
-                self.log.exception("plot_pareto failed")
-                self._artifacts["pareto_png"] = self._fallback_scatter_pareto(
-                    pareto_df, out,
-                )
 
         # --- Convergence -------------------------------------------------
         per_gen = (self._stats.get("search", {}) or {}).get("per_generation")
         if per_gen:
             out = self.cfg.report_dir / self.cfg.convergence_png
-            try:
-                self._artifacts["convergence_png"] = plot_convergence(
-                    per_generation=per_gen,
-                    output_path=out,
-                    metrics=list(self.cfg.convergence_metrics),
-                    title="NSGA-II Convergence",
-                )
+            self._artifacts["convergence_png"] = (
+                self._fallback_convergence(per_gen, out)
+            )
+            if self._artifacts["convergence_png"]:
                 self.log.info("Convergence plot -> %s", out)
-            except Exception:  # noqa: BLE001
-                self.log.exception("plot_convergence failed")
-                self._artifacts["convergence_png"] = (
-                    self._fallback_convergence(per_gen, out)
-                )
 
         # --- Boxplots (deploy-stage) ------------------------------------
         runtime_df = (self._stages.get("deploy").frames.get("runtime")
@@ -553,22 +658,11 @@ class ReportPipeline:
             cols = [c for c in self.cfg.boxplot_columns
                     if c in runtime_df.columns]
             if cols:
-                try:
-                    self._artifacts["boxplots_png"] = plot_boxplots(
-                        df=runtime_df,
-                        output_path=out,
-                        columns=cols,
-                        group_by=(self.cfg.boxplot_group_by
-                                  if self.cfg.boxplot_group_by
-                                  in runtime_df.columns else None),
-                        title="On-Device Metric Distributions",
-                    )
+                self._artifacts["boxplots_png"] = (
+                    self._fallback_boxplots(runtime_df, cols, out)
+                )
+                if self._artifacts["boxplots_png"]:
                     self.log.info("Boxplot -> %s", out)
-                except Exception:  # noqa: BLE001
-                    self.log.exception("plot_boxplots failed")
-                    self._artifacts["boxplots_png"] = (
-                        self._fallback_boxplots(runtime_df, cols, out)
-                    )
 
     # ------------------------------------------------------------------
     def _generate_latex(self) -> None:
@@ -638,13 +732,8 @@ class ReportPipeline:
             return
 
         out = self.cfg.report_dir / self.cfg.latex_tex
-        try:
-            export_latex_bundle(sections=sections, output_path=out,
-                                title=self.cfg.title)
-        except Exception:  # noqa: BLE001
-            self.log.exception("export_latex_bundle failed — using fallback")
-            out.write_text(self._fallback_latex_bundle(sections),
-                           encoding="utf-8")
+        out.write_text(self._fallback_latex_bundle(sections),
+                       encoding="utf-8")
         self._latex_sections = sections
         self._artifacts["latex_tex"] = out
         self.log.info("LaTeX bundle -> %s", out)
@@ -653,27 +742,20 @@ class ReportPipeline:
     def _safe_latex(self, df: pd.DataFrame, cols: list[str],
                     caption: str, label: str) -> str:
         try:
-            return to_latex_table(df=df, caption=caption, label=label,
-                                  columns=cols or None,
-                                  precision=self.cfg.table_precision)
-        except Exception:  # noqa: BLE001
-            self.log.exception("to_latex_table failed for %s", label)
             return self._fallback_latex_table(df, cols, caption, label)
+        except Exception:  # noqa: BLE001
+            self.log.exception("LaTeX table failed for %s", label)
+            return f"% table {label} could not be rendered\n"
 
     # ------------------------------------------------------------------
     def _generate_pdf(self) -> None:
         out = self.cfg.report_dir / self.cfg.summary_pdf
-        sections_payload = self._build_pdf_payload()
+        # The payload is persisted so a proper LaTeX/reportlab template can
+        # consume it later; the PDF itself is rendered with PdfPages.
+        _write_json_atomic(self.cfg.report_dir / "pdf_payload.json",
+                           self._build_pdf_payload())
 
-        try:
-            export_pdf_summary(payload=sections_payload, output_path=out)
-            self._artifacts["summary_pdf"] = out
-            self.log.info("Summary PDF -> %s", out)
-            return
-        except Exception:  # noqa: BLE001
-            self.log.warning("export_pdf_summary failed — using PdfPages fallback")
-
-        # PdfPages fallback: stitch the available PNGs into a single PDF.
+        # PdfPages: stitch the available PNGs into a single PDF.
         if not _HAVE_MPL:
             self.log.warning("matplotlib unavailable — skipping PDF.")
             return

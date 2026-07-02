@@ -126,7 +126,9 @@ DEFAULT_SEARCH_RESULTS: Path = PROJECT_ROOT / "results" / "search"
 DEFAULT_RESULTS_DIR: Path = PROJECT_ROOT / "results" / "retrain"
 DEFAULT_CHECKPOINTS_DIR: Path = PROJECT_ROOT / "checkpoints" / "final_models"
 DEFAULT_SPLITS_DIR: Path = PROJECT_ROOT / "data" / "splits"
-DEFAULT_CONFIG: Path = PROJECT_ROOT / "configs" / "retrain.yaml"
+# NOTE: the config folder is ``config/`` (singular); ``configs/`` silently
+# fell back to built-in defaults.
+DEFAULT_CONFIG: Path = PROJECT_ROOT / "config" / "retrain.yaml"
 
 # Columns guaranteed to be present in final_metrics.csv (extra metrics are
 # accepted and serialized as JSON).
@@ -254,18 +256,18 @@ def _configure_logging(log_path: Path | None,
 # Reproducibility
 # ---------------------------------------------------------------------------
 def _seed_everything(seed: int) -> None:
-    """Seed Python, NumPy, and Torch (CPU + CUDA) for deterministic retraining."""
-    import random
+    """Seed all RNG subsystems via the project-wide utility."""
+    from src.utils.set_seed import set_seed
+    set_seed(seed, deterministic_torch=True)
 
-    import numpy as np
 
-    random.seed(seed)
-    np.random.seed(seed)
-    torch.manual_seed(seed)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed_all(seed)
-        torch.backends.cudnn.benchmark = False
-        torch.backends.cudnn.deterministic = True
+def _backup_existing(path: Path, logger: logging.Logger) -> None:
+    """Rename an existing results file instead of silently truncating it."""
+    if path.is_file():
+        stamp = time.strftime("%Y%m%d-%H%M%S")
+        backup = path.with_name(f"{path.stem}.bak_{stamp}{path.suffix}")
+        path.rename(backup)
+        logger.info("Existing %s backed up to %s", path.name, backup.name)
 
 
 # ---------------------------------------------------------------------------
@@ -427,6 +429,26 @@ class RetrainPipeline:
 
         self._metrics_path = cfg.results_dir / "final_metrics.csv"
         self._ranked_path = cfg.results_dir / "model_ranked.csv"
+
+        # Cache previous metrics BEFORE the writer truncates the file, so a
+        # re-run with skip_existing=True can carry forward real test metrics
+        # instead of producing an empty ranking.
+        self._previous: dict[str, dict[str, Any]] = {}
+        if self._metrics_path.is_file():
+            try:
+                with self._metrics_path.open("r", encoding="utf-8") as fh:
+                    for row in csv.DictReader(fh):
+                        cid = row.get("candidate_id")
+                        if cid and str(row.get("status", "")).startswith("ok"):
+                            self._previous[cid] = dict(row)
+                self.log.info("Cached %d previous metric row(s) for reuse.",
+                              len(self._previous))
+            except Exception:  # noqa: BLE001
+                self.log.warning("Could not parse previous final_metrics.csv")
+
+        _backup_existing(self._metrics_path, self.log)
+        _backup_existing(self._ranked_path, self.log)
+
         self._writer = MetricsWriter(self._metrics_path)
         self._records: list[dict[str, Any]] = []
 
@@ -455,8 +477,23 @@ class RetrainPipeline:
         }
 
         if self.cfg.skip_existing and ckpt_path.is_file():
-            self.log.info("[%s] checkpoint exists — skipping retrain", cid)
-            record["status"] = "skipped_existing"
+            prev = self._previous.get(cid)
+            if prev is not None:
+                # Carry forward the previously measured metrics so the
+                # ranking still sees this candidate.
+                for col in ("test_auroc", "test_auprc", "test_f1",
+                            "val_auroc", "val_loss", "best_epoch",
+                            "train_seconds", "extra_metrics"):
+                    record[col] = prev.get(col)
+                record["status"] = "ok_cached"
+                self.log.info("[%s] checkpoint exists — reusing previous "
+                              "metrics (ok_cached)", cid)
+            else:
+                record["status"] = "skipped_existing"
+                self.log.warning(
+                    "[%s] checkpoint exists but no previous metrics found — "
+                    "candidate will be EXCLUDED from the ranking. Use "
+                    "--no-skip-existing to re-train it.", cid)
             return record
 
         self.log.info("[%s] building model + applying QAT wrapper", cid)
@@ -558,7 +595,8 @@ class RetrainPipeline:
     # ------------------------------------------------------------------
     def _rank_models(self, records: list[dict[str, Any]]) -> None:
         """Compute a weighted scalar score and write ``model_ranked.csv``."""
-        successful = [r for r in records if r.get("status") == "ok"]
+        successful = [r for r in records
+                      if str(r.get("status", "")).startswith("ok")]
         if not successful:
             self.log.warning("No successful retrains — skipping ranking")
             self._ranked_path.write_text(
@@ -655,8 +693,9 @@ class RetrainPipeline:
                                        cand["candidate_id"])
                 self._records.append(record)
                 self._writer.write(record)
-                if self.cfg.fail_fast and not record.get("status",
-                                                         "").startswith("ok"):
+                # Skipped/cached candidates are not failures.
+                if self.cfg.fail_fast and not str(
+                        record.get("status", "")).startswith(("ok", "skipped")):
                     self.log.error(
                         "fail_fast=True and candidate %s failed (%s) — aborting.",
                         cand["candidate_id"], record.get("status"),
@@ -668,7 +707,8 @@ class RetrainPipeline:
         self._rank_models(self._records)
 
         elapsed = time.perf_counter() - t0
-        n_ok = sum(1 for r in self._records if r.get("status") == "ok")
+        n_ok = sum(1 for r in self._records
+                   if str(r.get("status", "")).startswith("ok"))
         summary = {
             "n_candidates": len(candidates),
             "n_ok": n_ok,

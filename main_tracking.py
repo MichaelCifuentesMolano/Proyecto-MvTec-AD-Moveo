@@ -135,11 +135,14 @@ except ImportError:  # pragma: no cover
 # ---------------------------------------------------------------------------
 # Project module imports.
 # ---------------------------------------------------------------------------
+# NOTE: the previous imports referenced idealized names (TrackerCore,
+# ControlLoop-as-step-controller, list_scenarios/apply_scenario) that do not
+# exist in the implemented modules — this script could not be imported.
+# Thin adapters over the *real* APIs are defined below.
 from src.tracking.camera_stream import CameraStream
-from src.tracking.detector_interface import DetectorInterface
-from src.tracking.tracker_core import TrackerCore
-from src.tracking.control_loop import ControlLoop
-from src.tracking.robustness_test import list_scenarios, apply_scenario
+from src.tracking.detector_interface import DetectorInterface, DetectorConfig
+from src.tracking.tracker_core import make_tracker, TrackState
+from src.tracking.control_loop import PIDController
 from src.profiling.latency_meter import LatencyTimer
 from src.profiling.energy_meter import EnergyMeter
 
@@ -148,7 +151,8 @@ from src.profiling.energy_meter import EnergyMeter
 # Constants
 # ---------------------------------------------------------------------------
 PROJECT_ROOT: Path = Path(__file__).resolve().parent
-DEFAULT_CONFIG: Path = PROJECT_ROOT / "configs" / "tracking.yaml"
+# ``config/`` (singular) — ``configs/`` silently ignored config/tracking.yaml.
+DEFAULT_CONFIG: Path = PROJECT_ROOT / "config" / "tracking.yaml"
 DEFAULT_DEPLOY_RESULTS: Path = PROJECT_ROOT / "results" / "deploy"
 DEFAULT_RESULTS_DIR: Path = PROJECT_ROOT / "results" / "tracking"
 DEFAULT_VIDEO_DIR: Path = DEFAULT_RESULTS_DIR / "video_logs"
@@ -157,6 +161,197 @@ DEFAULT_INPUT_SHAPE: tuple[int, ...] = (1, 3, 224, 224)
 DEFAULT_FRAME_SIZE: tuple[int, int] = (640, 480)  # (W, H)
 
 NOMINAL_SCENARIO: str = "nominal"
+
+
+# ---------------------------------------------------------------------------
+# Adapters over the real src.tracking APIs
+# ---------------------------------------------------------------------------
+_SCENARIOS: tuple[str, ...] = ("occlusion", "low_light", "motion_blur",
+                               "gaussian_noise", "flicker")
+
+
+def list_scenarios() -> list[str]:
+    """Available robustness perturbations (deterministic per frame index)."""
+    return list(_SCENARIOS)
+
+
+def apply_scenario(name: str, image: np.ndarray,
+                   frame_index: int = 0, **_kw) -> np.ndarray:
+    """Apply a named perturbation. Self-contained and reproducible:
+    randomness is seeded with the frame index."""
+    rng = np.random.default_rng(frame_index)
+    img = image.astype(np.float32)
+    if name == "low_light":
+        out = img * 0.35
+    elif name == "gaussian_noise":
+        out = img + rng.normal(0.0, 12.0, size=img.shape)
+    elif name == "flicker":
+        out = img * (1.0 + 0.4 * math.sin(frame_index / 3.0))
+    elif name == "motion_blur":
+        k = 9
+        kernel = np.zeros((k, k), dtype=np.float32)
+        kernel[k // 2, :] = 1.0 / k
+        if _HAVE_CV2:
+            out = cv2.filter2D(img, -1, kernel)
+        else:  # crude horizontal box blur fallback
+            out = img.copy()
+            for s in range(1, k // 2 + 1):
+                out += np.roll(img, s, axis=1) + np.roll(img, -s, axis=1)
+            out /= float(k)
+    elif name == "occlusion":
+        out = img.copy()
+        h, w = out.shape[:2]
+        ow, oh = int(w * 0.30), int(h * 0.30)
+        x0 = int(rng.integers(0, max(w - ow, 1)))
+        y0 = int(rng.integers(0, max(h - oh, 1)))
+        out[y0:y0 + oh, x0:x0 + ow] = 0.0
+    else:
+        out = img
+    return np.clip(out, 0, 255).astype(np.uint8)
+
+
+def _primary_bbox(detection: Any) -> tuple[int, int, int, int] | None:
+    """Highest-confidence ROI of a DetectionResult as (x, y, w, h)."""
+    rois = getattr(detection, "rois", None) or []
+    if not rois:
+        return None
+    x1, y1, x2, y2 = rois[0].bbox
+    return (int(x1), int(y1), int(x2 - x1), int(y2 - y1))
+
+
+@dataclass
+class TrackingState:
+    """Expected by the session loop; produced by :class:`TrackerCore`."""
+    success: bool
+    bbox: tuple[int, int, int, int] | None      # (x, y, w, h)
+    confidence: float | None
+    status: str                                  # tracking | searching | lost
+    detection: Any = None
+    metadata: dict = field(default_factory=dict)
+
+
+class TrackerCore:
+    """Single-target adapter over :class:`MultiObjectTracker`.
+
+    The real tracker is multi-object and self-initialising (track birth /
+    death from detections); this adapter exposes the primary (highest
+    confidence) active track through the simple API the session loop uses.
+    """
+
+    def __init__(self, detector: Any, algorithm: str = "sort",
+                 reinit_every: int = 10, lost_threshold: float = 0.3,
+                 frame_size: tuple[int, int] = DEFAULT_FRAME_SIZE,
+                 **kwargs: Any) -> None:
+        self._mot = make_tracker(
+            algorithm=algorithm,
+            frame_width=int(frame_size[0]),
+            frame_height=int(frame_size[1]),
+            **kwargs,
+        )
+        self._lost_threshold = lost_threshold
+        self._last_state: TrackingState | None = None
+
+    @property
+    def is_tracking(self) -> bool:
+        return bool(self._mot.active_tracks)
+
+    def initialize(self, frame: np.ndarray,
+                   bbox: tuple | None = None) -> bool:
+        # MultiObjectTracker self-initialises from detections; kept for API
+        # compatibility with the session loop.
+        return True
+
+    def update(self, frame: np.ndarray, detection: Any) -> TrackingState:
+        self._mot.update(detection, frame=frame)
+        active = self._mot.active_tracks
+        if not active:
+            state = TrackingState(success=False, bbox=None, confidence=None,
+                                  status="searching", detection=detection)
+        else:
+            primary = max(active, key=lambda t: t.confidence)
+            b = primary.bbox
+            confirmed = primary.state == TrackState.CONFIRMED
+            low_conf = primary.confidence < self._lost_threshold
+            state = TrackingState(
+                success=confirmed and not low_conf,
+                bbox=(int(b.x1), int(b.y1),
+                      int(b.x2 - b.x1), int(b.y2 - b.y1)),
+                confidence=float(primary.confidence),
+                status=("tracking" if confirmed and not low_conf
+                        else "lost" if low_conf else "searching"),
+                detection=detection,
+                metadata={"track_id": primary.track_id,
+                          "n_active": len(active)},
+            )
+        self._last_state = state
+        return state
+
+    def reset(self) -> None:
+        self._mot.reset()
+        self._last_state = None
+
+
+@dataclass
+class _StepCommand:
+    """Per-frame control command produced by :class:`StepControlLoop`."""
+    pan: float = 0.0
+    tilt: float = 0.0
+    speed: float = 0.0
+    is_search_mode: bool = False
+    saturated: bool = False
+    metadata: dict = field(default_factory=dict)
+
+
+class StepControlLoop:
+    """Step-based pan/tilt controller built on :class:`PIDController`.
+
+    (The module-level ``ControlLoop`` owns its own capture loop and is not
+    usable per-frame; this adapter keeps the session loop in charge.)
+    """
+
+    def __init__(self, controller_cfg: dict[str, Any],
+                 frame_size: tuple[int, int]) -> None:
+        kp = float(controller_cfg.get("kp", 0.6))
+        ki = float(controller_cfg.get("ki", 0.0))
+        kd = float(controller_cfg.get("kd", 0.05))
+        self._pan = PIDController(kp, ki, kd, output_limit=1.0)
+        self._tilt = PIDController(kp, ki, kd, output_limit=1.0)
+        self._deadband = float(controller_cfg.get("deadband_px", 8))
+        self._max_pan = float(controller_cfg.get("max_pan_deg_s", 60.0))
+        self._max_tilt = float(controller_cfg.get("max_tilt_deg_s", 60.0))
+        self._cx = frame_size[0] / 2.0
+        self._cy = frame_size[1] / 2.0
+
+    def step(self, tracking: TrackingState) -> _StepCommand:
+        if not tracking.success or tracking.bbox is None:
+            return _StepCommand(is_search_mode=True)
+        x, y, w, h = tracking.bbox
+        err_x = (x + w / 2.0) - self._cx
+        err_y = (y + h / 2.0) - self._cy
+        if abs(err_x) < self._deadband:
+            err_x = 0.0
+        if abs(err_y) < self._deadband:
+            err_y = 0.0
+        # Normalised error -> PID -> deg/s command.
+        pan = self._pan.compute(err_x / max(self._cx, 1.0)) * self._max_pan
+        tilt = self._tilt.compute(err_y / max(self._cy, 1.0)) * self._max_tilt
+        saturated = (abs(pan) >= 0.98 * self._max_pan
+                     or abs(tilt) >= 0.98 * self._max_tilt)
+        return _StepCommand(pan=pan, tilt=tilt, saturated=saturated,
+                            metadata={"err_x": err_x, "err_y": err_y})
+
+    def reset(self) -> None:
+        self._pan.reset()
+        self._tilt.reset()
+
+
+def _backup_existing(path: Path, logger: logging.Logger) -> None:
+    """Rename an existing results file instead of silently truncating it."""
+    if path.is_file():
+        stamp = time.strftime("%Y%m%d-%H%M%S")
+        backup = path.with_name(f"{path.stem}.bak_{stamp}{path.suffix}")
+        path.rename(backup)
+        logger.info("Existing %s backed up to %s", path.name, backup.name)
 
 METRIC_COLUMNS: tuple[str, ...] = (
     "session_id", "scenario", "status",
@@ -232,6 +427,10 @@ class TrackingConfig:
     min_confidence_for_track: float = 0.25
     max_consecutive_lost: int = 30
 
+    # Repetitions per scenario (>=3 recommended so per-scenario statistics
+    # and group comparisons in main_report have something to work with).
+    repeats_per_scenario: int = 3
+
     # Ground truth (optional, for IoU / pixel error)
     ground_truth_path: Path | None = None
 
@@ -265,7 +464,63 @@ class TrackingConfig:
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "TrackingConfig":
+        """Build a TrackingConfig from a plain dict.
+
+        Accepts both the flat schema (dataclass fields at top level) and the
+        nested schema used by ``config/tracking.yaml`` (``camera:``,
+        ``detector:``, ``tracker:``, ``control:``), which is flattened here
+        so the YAML is actually honoured instead of falling into ``extra``.
+        """
         kwargs = dict(data)
+
+        # ---- Nested-schema support --------------------------------------
+        cam = kwargs.pop("camera", None) or {}
+        if cam:
+            src = cam.get("source")
+            if src == "video_file":
+                vf = (cam.get("video_file") or {}).get("path")
+                if vf:
+                    kwargs.setdefault("source", vf)
+            elif src == "usb":
+                kwargs.setdefault("source",
+                                  (cam.get("usb") or {}).get("device_id", 0))
+            elif src is not None:
+                kwargs.setdefault("source", src)
+            if cam.get("width") and cam.get("height"):
+                kwargs.setdefault("resolution",
+                                  (cam["width"], cam["height"]))
+            if cam.get("fps"):
+                kwargs.setdefault("source_fps", cam["fps"])
+
+        det = kwargs.pop("detector", None) or {}
+        if det:
+            if "score_threshold" in det:
+                kwargs.setdefault("score_threshold", det["score_threshold"])
+            if det.get("model_path"):
+                kwargs.setdefault("engine_path", det["model_path"])
+
+        trk = kwargs.pop("tracker", None) or {}
+        if trk:
+            if "algorithm" in trk:
+                kwargs.setdefault("tracker_algorithm", trk["algorithm"])
+
+        ctl = kwargs.pop("control", None) or {}
+        pid = (ctl.get("pid") or {}) if ctl else {}
+        if pid:
+            controller = dict(TrackingConfig().controller)
+            controller.update({k: v for k, v in pid.items()
+                               if k in ("kp", "ki", "kd")})
+            kwargs.setdefault("controller", controller)
+        if ctl and "follow_min_score" in ctl:
+            kwargs.setdefault("min_confidence_for_track",
+                              ctl["follow_min_score"])
+
+        kwargs.pop("publisher", None)     # hardware publisher: not used here
+        rob = kwargs.pop("robustness", None) or {}
+        if rob and "seed" in rob:
+            kwargs.setdefault("seed", rob["seed"])
+        # ------------------------------------------------------------------
+
         for key in ("deploy_results_dir", "results_dir", "video_dir",
                     "engine_path", "ground_truth_path"):
             if key in kwargs and kwargs[key] is not None:
@@ -550,6 +805,8 @@ class TrackingPipeline:
 
         self._metrics_path = cfg.results_dir / "tracking_metrics.csv"
         self._failures_path = cfg.results_dir / "failure_cases.csv"
+        _backup_existing(self._metrics_path, self.log)
+        _backup_existing(self._failures_path, self.log)
         self._metrics_writer = _open_csv(self._metrics_path, METRIC_COLUMNS)
         self._failures_writer = _open_csv(self._failures_path, FAILURE_COLUMNS)
 
@@ -601,9 +858,10 @@ class TrackingPipeline:
                      scenario: str,
                      detector: DetectorInterface,
                      tracker: TrackerCore,
-                     controller: ControlLoop) -> SessionResult:
+                     controller: StepControlLoop,
+                     repeat: int = 0) -> SessionResult:
         """Run one camera pass under a given scenario and return its summary."""
-        session_id = f"{scenario}_{int(time.time())}"
+        session_id = f"{scenario}_r{repeat}_{int(time.time())}"
         session = SessionResult(session_id=session_id, scenario=scenario)
 
         # Reset stateful components for an independent pass.
@@ -655,17 +913,23 @@ class TrackingPipeline:
                     det_dt = det_timer.stop()
 
                     # --- 3. (re)initialize tracker if needed -------------
-                    if not tracker.is_tracking and detection.bbox is not None \
+                    det_bbox = _primary_bbox(detection)
+                    if not tracker.is_tracking and det_bbox is not None \
                             and detection.score >= self.cfg.score_threshold:
-                        tracker.initialize(image, detection.bbox)
+                        tracker.initialize(image, det_bbox)
 
                     # --- 4. tracker update -------------------------------
-                    state = tracker.update(image)
+                    state = tracker.update(image, detection)
                     tracking_flags.append(bool(state.success))
 
                     # --- 5. control step ---------------------------------
                     cmd = controller.step(state)
                     saturations.append(bool(getattr(cmd, "saturated", False)))
+
+                    # End-to-end latency covers perception + tracking +
+                    # control ONLY. Video encoding/disk I/O below must not
+                    # contaminate the reported loop latency.
+                    e2e_timer.stop()
 
                     # --- 6. ground-truth metrics -------------------------
                     gt_box = self._gt.get(frame.index)
@@ -752,7 +1016,6 @@ class TrackingPipeline:
                         )
                         video_writer.write(annotated)
 
-                    e2e_timer.stop()
                     session.n_frames += 1
 
                 # --- end of stream loop ---------------------------------
@@ -843,60 +1106,70 @@ class TrackingPipeline:
             scenarios = [NOMINAL_SCENARIO]
 
         # Build the long-lived components once; sessions reset their state.
-        detector = DetectorInterface(
-            engine_path=self._engine_info["engine_path"],
-            input_shape=self.cfg.input_shape,
-            device=self.cfg.device,
-            score_threshold=self.cfg.score_threshold,
+        detector = DetectorInterface.from_trt_engine(
+            self._engine_info["engine_path"],
+            DetectorConfig(score_threshold=self.cfg.score_threshold),
         )
-        try:
-            detector.warmup(self.cfg.warmup_iters)
-        except Exception:  # noqa: BLE001
-            self.log.warning("Detector warmup failed — continuing.")
+        if hasattr(detector, "warmup"):
+            try:
+                detector.warmup(self.cfg.warmup_iters)
+            except Exception:  # noqa: BLE001
+                self.log.warning("Detector warmup failed — continuing.")
 
         tracker = TrackerCore(
             detector=detector,
             algorithm=self.cfg.tracker_algorithm,
             reinit_every=self.cfg.reinit_every,
             lost_threshold=self.cfg.lost_threshold,
+            frame_size=self.cfg.resolution,
         )
-        controller = ControlLoop(
+        controller = StepControlLoop(
             controller_cfg=self.cfg.controller,
             frame_size=self.cfg.resolution,
         )
 
+        n_repeats = max(1, int(self.cfg.repeats_per_scenario))
+        aborted = False
         try:
             for i, scenario in enumerate(scenarios):
-                self.log.info("---- Scenario %d/%d: %s ----",
-                              i + 1, len(scenarios), scenario)
-                try:
-                    session = self._run_session(scenario, detector,
-                                                tracker, controller)
-                except KeyboardInterrupt:
-                    raise
-                except Exception:  # noqa: BLE001
-                    self.log.exception("Unhandled error in scenario %s",
-                                       scenario)
-                    session = SessionResult(
-                        session_id=f"{scenario}_failed",
-                        scenario=scenario,
-                        status="failed_unhandled",
-                        error=traceback.format_exc(limit=3),
-                    )
-                self._session_records.append(session)
-                self._record_metrics(session)
+                for rep in range(n_repeats):
+                    self.log.info("---- Scenario %d/%d: %s (repeat %d/%d) ----",
+                                  i + 1, len(scenarios), scenario,
+                                  rep + 1, n_repeats)
+                    try:
+                        session = self._run_session(scenario, detector,
+                                                    tracker, controller,
+                                                    repeat=rep)
+                    except KeyboardInterrupt:
+                        raise
+                    except Exception:  # noqa: BLE001
+                        self.log.exception("Unhandled error in scenario %s",
+                                           scenario)
+                        session = SessionResult(
+                            session_id=f"{scenario}_r{rep}_failed",
+                            scenario=scenario,
+                            status="failed_unhandled",
+                            error=traceback.format_exc(limit=3),
+                        )
+                    self._session_records.append(session)
+                    self._record_metrics(session)
 
-                if self.cfg.fail_fast and not session.status.startswith("ok"):
-                    self.log.error(
-                        "fail_fast=True and scenario %s failed (%s) — abort.",
-                        scenario, session.status,
-                    )
+                    if self.cfg.fail_fast and \
+                            not session.status.startswith("ok"):
+                        self.log.error(
+                            "fail_fast=True and scenario %s failed (%s) "
+                            "— abort.", scenario, session.status,
+                        )
+                        aborted = True
+                        break
+                if aborted:
                     break
         finally:
-            try:
-                detector.close()
-            except Exception:  # noqa: BLE001
-                pass
+            if hasattr(detector, "close"):
+                try:
+                    detector.close()
+                except Exception:  # noqa: BLE001
+                    pass
             self._metrics_writer.close()
             self._failures_writer.close()
 

@@ -118,6 +118,7 @@ try:
 except ImportError:  # pragma: no cover
     yaml = None
 
+import numpy as np
 import torch
 
 # ---------------------------------------------------------------------------
@@ -126,17 +127,29 @@ import torch
 from src.models.model_factory import build_model
 from src.quantization.qat_wrapper import wrap_for_qat
 from src.deployment.export_onnx import export_to_onnx
-from src.deployment.export_tensorrt import build_tensorrt_engine
-from src.deployment.runtime_benchmark import benchmark_engine
+# NOTE: the real TensorRT API lives entirely in export_tensorrt (the previous
+# imports referenced a non-existent ``build_tensorrt_engine`` and looked for
+# ``benchmark_engine`` in the wrong module — this script could not even be
+# imported).
+from src.deployment.export_tensorrt import (
+    TRTBuildConfig,
+    build_engine,
+    load_engine,
+    run_inference,
+    benchmark_engine,
+    collect_calibration_batches,
+)
 from src.profiling.energy_meter import measure_energy
 from src.profiling.ram_meter import measure_peak_ram
+from src.utils.set_seed import set_seed
 
 
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
 PROJECT_ROOT: Path = Path(__file__).resolve().parent
-DEFAULT_CONFIG: Path = PROJECT_ROOT / "configs" / "deploy.yaml"
+# ``config/`` (singular) — ``configs/`` silently fell back to defaults.
+DEFAULT_CONFIG: Path = PROJECT_ROOT / "config" / "deploy.yaml"
 DEFAULT_RETRAIN_RESULTS: Path = PROJECT_ROOT / "results" / "retrain"
 DEFAULT_RESULTS_DIR: Path = PROJECT_ROOT / "results" / "deploy"
 DEFAULT_DEPLOY_DIR: Path = PROJECT_ROOT / "deployment" / "models"
@@ -194,6 +207,11 @@ class DeployConfig:
     workspace_mb: int = 1024
     n_warmup: int = 50
     n_iters: int = 500
+
+    # INT8 calibration (images drawn from the *train* split of the category;
+    # calibration must never see the test split).
+    calibration_images: int = 200
+    calibration_batch_size: int = 8
 
     # Reproducibility / device
     seed: int = 42
@@ -348,6 +366,69 @@ def _maybe_float(v: Any) -> float | None:
         return None
 
 
+def _backup_existing(path: Path, logger: logging.Logger) -> None:
+    """Rename an existing results file instead of silently truncating it."""
+    if path.is_file():
+        stamp = time.strftime("%Y%m%d-%H%M%S")
+        backup = path.with_name(f"{path.stem}.bak_{stamp}{path.suffix}")
+        path.rename(backup)
+        logger.info("Existing %s backed up to %s", path.name, backup.name)
+
+
+# ---------------------------------------------------------------------------
+# INT8 calibration data
+# ---------------------------------------------------------------------------
+def _load_calibration_batches(splits_dir: Path,
+                              category: str,
+                              input_shape: tuple[int, ...],
+                              n_images: int,
+                              batch_size: int,
+                              logger: logging.Logger) -> list["torch.Tensor"]:
+    """Build INT8 calibration batches from the category's *train* split.
+
+    Uses the split manifest written by main_prepare.py
+    (``data/splits/<category>.json``). Images are resized to the deployment
+    input resolution and scaled to [0, 1] float32 — this MUST match the
+    preprocessing used at inference time.
+    """
+    from PIL import Image  # local import; Pillow ships with torchvision
+
+    manifest_path = splits_dir / f"{category}.json"
+    if not manifest_path.is_file():
+        raise FileNotFoundError(
+            f"Split manifest not found: {manifest_path}. "
+            "Run main_prepare.py first."
+        )
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    records = (manifest.get("splits", {}) or {}).get("train", [])
+    if not records:
+        raise RuntimeError(f"No train records in {manifest_path}")
+
+    _, _, h, w = (list(input_shape) + [224, 224, 224, 224])[:4]
+    tensors: list[torch.Tensor] = []
+    for rec in records[:n_images]:
+        p = Path(rec.get("abs_path") or "")
+        if not p.is_file():
+            # Fall back to the portable relative path.
+            p = splits_dir.parent / "raw" / "mvtec_ad" / category / rec["path"]
+        if not p.is_file():
+            continue
+        img = Image.open(p).convert("RGB").resize((w, h))
+        arr = torch.from_numpy(
+            np.asarray(img, dtype=np.float32) / 255.0
+        ).permute(2, 0, 1)                      # HWC -> CHW
+        tensors.append(arr)
+
+    if not tensors:
+        raise RuntimeError("No calibration images could be loaded.")
+
+    batches = [torch.stack(tensors[i:i + batch_size])
+               for i in range(0, len(tensors), batch_size)]
+    logger.info("Calibration set: %d image(s) in %d batch(es) of <=%d "
+                "(train split only).", len(tensors), len(batches), batch_size)
+    return batches
+
+
 # ---------------------------------------------------------------------------
 # CSV writer (crash-safe append-only with fixed schema)
 # ---------------------------------------------------------------------------
@@ -392,6 +473,9 @@ class DeployPipeline:
 
         cfg.results_dir.mkdir(parents=True, exist_ok=True)
         cfg.deploy_dir.mkdir(parents=True, exist_ok=True)
+
+        _backup_existing(cfg.results_dir / "runtime_metrics.csv", self.log)
+        _backup_existing(cfg.results_dir / "final_embedded_rank.csv", self.log)
 
         self._writer = FixedSchemaWriter(
             cfg.results_dir / "runtime_metrics.csv", RUNTIME_COLUMNS,
@@ -446,6 +530,19 @@ class DeployPipeline:
         return result
 
     # ------------------------------------------------------------------
+    def _get_calibration_data(self) -> list[torch.Tensor]:
+        """Lazily build (and cache in-memory) the INT8 calibration batches."""
+        if not hasattr(self, "_calib_cache"):
+            self._calib_cache = _load_calibration_batches(
+                splits_dir=self.cfg.splits_dir,
+                category=self.cfg.category,
+                input_shape=self.cfg.input_shape,
+                n_images=self.cfg.calibration_images,
+                batch_size=self.cfg.calibration_batch_size,
+                logger=self.log,
+            )
+        return self._calib_cache
+
     def _build_engine_for(self,
                           candidate_id: str,
                           onnx_path: Path,
@@ -458,47 +555,109 @@ class DeployPipeline:
             return {"engine_path": engine_path, "precision": precision,
                     "build_seconds": 0.0, "valid": True, "reused": True}
 
-        return build_tensorrt_engine(
-            onnx_path=onnx_path,
-            engine_path=engine_path,
-            precision=precision,
+        # INT8 requires calibration data (drawn from the train split) or a
+        # previously written calibration cache; export_tensorrt otherwise
+        # silently degrades to FP16, which would invalidate the comparison.
+        calibration_data: list[torch.Tensor] | None = None
+        calib_cache = (self.cfg.deploy_dir
+                       / f"{candidate_id}_int8.calib")
+        if precision == "int8" and not calib_cache.is_file():
+            calibration_data = self._get_calibration_data()
+
+        trt_cfg = TRTBuildConfig(
+            precision=precision,                       # type: ignore[arg-type]
             workspace_mb=self.cfg.workspace_mb,
+            min_batch=int(self.cfg.input_shape[0]),
+            opt_batch=int(self.cfg.input_shape[0]),
             max_batch=int(self.cfg.input_shape[0]),
+            calibration_cache=calib_cache if precision == "int8" else None,
         )
+        result = build_engine(
+            onnx_path=onnx_path,
+            output_path=engine_path,
+            config=trt_cfg,
+            calibration_data=calibration_data,
+            metadata={"candidate_id": candidate_id,
+                      "category": self.cfg.category},
+        )
+
+        # A silent FP16 fallback of an INT8 request is a *failure* for the
+        # experiment (the precision label would lie).
+        actual_precision = getattr(result, "precision", precision)
+        if actual_precision != precision:
+            return {"engine_path": engine_path, "precision": precision,
+                    "build_seconds": getattr(result, "elapsed_seconds", None),
+                    "valid": False,
+                    "log": (f"requested {precision} but builder produced "
+                            f"{actual_precision} (missing calibration?)")}
+
+        return {
+            "engine_path": Path(getattr(result, "engine_path", None)
+                                or engine_path),
+            "precision": actual_precision,
+            "build_seconds": getattr(result, "elapsed_seconds", None),
+            "valid": bool(getattr(result, "success", False)),
+            "log": getattr(result, "error_message", "") or "",
+        }
 
     # ------------------------------------------------------------------
     def _measure_artifact(self,
                           engine_path: Path,
                           precision: str) -> dict[str, Any]:
-        """Run benchmark + energy + RAM measurements for a single engine."""
-        bench = benchmark_engine(
-            engine_path=engine_path,
-            input_shape=self.cfg.input_shape,
-            splits_dir=self.cfg.splits_dir,
-            category=self.cfg.category,
+        """Run benchmark + energy + RAM measurements for a single engine.
+
+        Adapts the real ``export_tensorrt`` API: the engine is deserialised
+        once, latency comes from ``benchmark_engine`` (keys ``p50_ms`` …),
+        and the energy/RAM meters receive a TensorRT inference runner via
+        ``runner_factory`` (they cannot consume an engine path directly).
+        """
+        engine = load_engine(engine_path)
+        ctx = engine.create_execution_context()
+        dummy = torch.randn(*self.cfg.input_shape, device="cuda")
+
+        def _trt_runner(**_kw):
+            def _run():
+                return run_inference(engine, dummy, context=ctx)
+            return _run
+
+        raw = benchmark_engine(
+            engine,
+            self.cfg.input_shape,
             n_warmup=self.cfg.n_warmup,
-            n_iters=self.cfg.n_iters,
-            device=self.cfg.device,
-            precision=precision,
+            n_runs=self.cfg.n_iters,
         )
+        bench = {
+            "latency_ms_mean": raw.get("mean_ms"),
+            "latency_ms_p50":  raw.get("p50_ms"),
+            "latency_ms_p95":  raw.get("p95_ms"),
+            "latency_ms_p99":  raw.get("p99_ms"),
+            "throughput_fps":  raw.get("throughput_fps"),
+            # On-device AUROC over the test split is not yet wired into
+            # benchmark_engine; kept as None so the ranking drops the key
+            # instead of pretending it was measured.
+            "auroc": None,
+            "raw": raw,
+        }
 
         energy = measure_energy(
-            engine_path,
+            engine,
             n_iters=self.cfg.n_iters,
             device=self.cfg.device,
             input_shape=self.cfg.input_shape,
+            runner_factory=_trt_runner,
         )
-        if energy.get("energy_mj") is not None and self.cfg.n_iters > 0:
-            energy["energy_mj_per_inf"] = float(energy["energy_mj"]) / float(
-                self.cfg.n_iters
-            )
-        else:
-            energy["energy_mj_per_inf"] = None
+        # The meter reports per-inference energy directly (idle-corrected
+        # when possible); the previous code divided a key that doesn't exist.
+        energy["energy_mj_per_inf"] = (
+            energy.get("active_energy_mj_per_inf")
+            or energy.get("energy_mj_per_inf")
+        )
 
         ram = measure_peak_ram(
-            engine_path,
+            engine,
             device=self.cfg.device,
             input_shape=self.cfg.input_shape,
+            runner_factory=_trt_runner,
         )
         return {"bench": bench, "energy": energy, "ram": ram}
 
@@ -579,7 +738,8 @@ class DeployPipeline:
                 peak_ram_mb     =ram.get("peak_ram_mb"),
                 device_peak_mb  =ram.get("device_peak_mb"),
                 extra={
-                    "energy_total_mj": energy.get("energy_mj"),
+                    "energy_total_mj": (energy.get("active_energy_mj")
+                                        or energy.get("energy_mj")),
                     "energy_source":   energy.get("source"),
                     "host_peak_mb":    ram.get("host_peak_mb"),
                     "bench_extra": {
@@ -655,8 +815,12 @@ class DeployPipeline:
             valid = [v for v in values if v is not None]
             vmin, vmax = min(valid), max(valid)
             span = vmax - vmin or 1.0
+            # Missing values get the WORST normalised score for the metric's
+            # direction (0.0 previously meant "best" for lower-is-better
+            # metrics, rewarding artifacts whose measurement failed).
+            missing = 1.0 if weights[k] < 0 else 0.0
             norm[k] = [
-                ((v - vmin) / span) if v is not None else 0.0
+                ((v - vmin) / span) if v is not None else missing
                 for v in values
             ]
 
@@ -701,9 +865,7 @@ class DeployPipeline:
             encoding="utf-8",
         )
 
-        torch.manual_seed(self.cfg.seed)
-        if torch.cuda.is_available():
-            torch.cuda.manual_seed_all(self.cfg.seed)
+        set_seed(self.cfg.seed, deterministic_torch=True)
 
         candidates = _load_candidates(self.cfg, self.log)
 
