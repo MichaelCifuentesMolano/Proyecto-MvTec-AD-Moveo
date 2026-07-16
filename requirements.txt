@@ -1,0 +1,27 @@
+# Core Deep Learning & Computer Vision
+torch>=2.0.0
+torchvision>=0.15.0
+opencv-python>=4.7.0
+Pillow>=9.0.0
+
+# Scientific Computing & Data Analysis
+numpy>=1.22.0
+scipy>=1.10.0
+scikit-learn>=1.2.0
+pandas>=2.0.0
+matplotlib>=3.7.0
+
+# ONNX & Serialization
+onnx>=1.14.0
+onnxruntime>=1.15.0
+onnx-simplifier>=0.4.0
+openpyxl>=3.1.0
+PyYAML>=6.0
+
+# Hardware Profiling & Embedded Systems (Jetson)
+psutil>=5.9.0
+nvidia-ml-py>=11.525.0
+pyserial>=3.5
+
+# Platform-specific tracking dependencies (RealSense camera)
+pyrealsense2>=2.50.0; platform_system == "Windows" or platform_system == "Linux"

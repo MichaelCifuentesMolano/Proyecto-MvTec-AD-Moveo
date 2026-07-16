@@ -1,5 +1,15 @@
 # Datasets
-data/
+mvtec_anomaly_detection.tar.xz
+data/*
+!data/raw/
+data/raw/*
+!data/raw/.gitkeep
+!data/processed/
+data/processed/*
+!data/processed/.gitkeep
+!data/splits/
+data/splits/*
+!data/splits/.gitkeep
 
 # Python
 __pycache__/
