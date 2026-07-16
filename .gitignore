@@ -28,3 +28,6 @@ ENV/
 .vscode/
 .idea/
 .DS_Store
+
+# Local documents & literature
+Redes Enteras Bibliografia/
