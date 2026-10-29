@@ -183,7 +183,7 @@ class RetrainConfig:
     # before being weighted. AUROC is treated as "higher is better"; latency,
     # RAM, and energy as "lower is better".
     ranking: dict[str, float] = field(default_factory=lambda: {
-        "test_auroc":           1.0,
+        "val_auroc":            1.0,   # never test_auroc: ranking on test leaks
         "search_latency_ms":    -0.20,
         "search_peak_ram_mb":   -0.10,
         "search_energy_mj":     -0.10,
@@ -548,7 +548,7 @@ class RetrainPipeline:
                 splits_dir=self.cfg.splits_dir,
                 category=self.cfg.category,
                 device=self.cfg.device,
-                split="val",
+                split="val_ad",   # "val" is normal-only -> AUROC undefined
             )
         except Exception as exc:  # noqa: BLE001
             self.log.exception("[%s] validation failed", cid)

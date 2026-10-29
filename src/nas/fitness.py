@@ -125,7 +125,9 @@ class FitnessConfig:
     # ---- Dataset ----
     splits_dir:              str | Path = Path("data/splits")
     category:                str        = "bottle"
-    eval_split:              str        = "test"
+    # val_ad = defect-stratified slice of the official test set; "test" must
+    # never drive the search (it would leak into the reported numbers).
+    eval_split:              str        = "val_ad"
 
     # ---- Device ----
     device:                  str        = "cuda"
@@ -144,9 +146,12 @@ class FitnessConfig:
     n_profiling_warmup:      int        = 10
     n_profiling_iters:       int        = 30
     profiling_amp:           bool       = False
-    # Energy backend: "auto" | "tegrastats" | "sysfs" | "nvml" | "noop".
-    # On a desktop PC with an NVIDIA GPU use "nvml" (requires pynvml);
-    # on Jetson, "auto" resolves to tegrastats/sysfs.
+    # Energy backend: "auto" | "tegrastats" | "sysfs" | "nvml" | "none".
+    # On a desktop PC with an NVIDIA GPU use "nvml" (requires pynvml and a GPU
+    # that reports power — many laptop GPUs do not); on Jetson, "auto"
+    # resolves to tegrastats/sysfs. "none" disables the objective explicitly
+    # (energy_mj = 0 for every candidate, so it never affects dominance).
+    # Any other backend that resolves to noop aborts at start-up.
     energy_backend:          str        = "auto"
 
     # ---- Normalisation reference points ----
@@ -348,6 +353,22 @@ class FitnessEvaluator:
         self._callbacks  = extra_callbacks or []
         self._n_calls    = 0
         self._n_failures = 0
+        self._check_energy_backend()
+
+    def _check_energy_backend(self) -> None:
+        """Fail at start-up instead of penalising every candidate's energy."""
+        if self._cfg.energy_backend == "none":
+            LOG.warning("Energy objective DISABLED (energy_backend='none'): "
+                        "energy_mj = 0 for every candidate.")
+            return
+        from src.profiling.energy_meter import select_backend
+        backend = select_backend(self._cfg.energy_backend, device=self._cfg.device)
+        if backend.name == "noop":
+            raise RuntimeError(
+                f"Energy backend {self._cfg.energy_backend!r} cannot measure "
+                "power on this machine (NVML 'Not Supported' on many laptop "
+                "GPUs). Use energy_backend: none to search without the energy "
+                "objective, or run on the Jetson.")
 
     # ------------------------------------------------------------------
     # NSGA-II-compatible entry point
@@ -733,7 +754,9 @@ class FitnessEvaluator:
             ok = False
 
         # ---- Energy ----
-        if _measure_energy is not None:
+        if cfg.energy_backend == "none":
+            hw["energy_mj"] = 0.0
+        elif _measure_energy is not None:
             try:
                 def _eng():
                     return _measure_energy(

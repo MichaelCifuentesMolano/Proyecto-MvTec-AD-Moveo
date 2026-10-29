@@ -122,6 +122,7 @@ class PrepareConfig:
     deterministic: bool = True
 
     val_ratio: float = 0.15
+    val_ad_ratio: float = 0.3   # share of official test moved to val_ad
     stratify_by_defect: bool = True
 
     expected_categories: tuple[str, ...] = MVTEC_CATEGORIES
@@ -410,6 +411,7 @@ class PreparePipeline:
             raw_dir=self.cfg.raw_dir,
             splits_dir=self.cfg.splits_dir,
             val_ratio=self.cfg.val_ratio,
+            val_ad_ratio=self.cfg.val_ad_ratio,
             seed=self.cfg.seed,
             stratify_by_defect=self.cfg.stratify_by_defect,
         )
@@ -512,6 +514,7 @@ def _build_argparser() -> argparse.ArgumentParser:
     p.add_argument("--results-dir", type=Path, default=None)
     p.add_argument("--seed", type=int, default=None)
     p.add_argument("--val-ratio", type=float, default=None)
+    p.add_argument("--val-ad-ratio", type=float, default=None)
     p.add_argument("--no-deterministic", action="store_true",
                    help="Disable deterministic CUDA/cuDNN flags")
     p.add_argument("--no-stratify", action="store_true",
@@ -542,6 +545,7 @@ def _config_from_args(args: argparse.Namespace) -> PrepareConfig:
         "results_dir": args.results_dir,
         "seed": args.seed,
         "val_ratio": args.val_ratio,
+        "val_ad_ratio": args.val_ad_ratio,
     }
     for k, v in overrides.items():
         if v is not None:

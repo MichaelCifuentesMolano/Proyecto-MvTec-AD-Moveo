@@ -36,7 +36,7 @@ Public interface (consumed by ``main_search.py`` / ``main_deploy.py``)
     Returns at least::
 
         {
-            "peak_ram_mb":        float,   # max(host_peak, device_peak)
+            "peak_ram_mb":        float,   # torch-allocator peak if CUDA module, else max(host, device)
             "host_peak_mb":       float,
             "host_baseline_mb":   float,
             "device_peak_mb":     float | None,
@@ -393,10 +393,16 @@ def measure_peak_ram(target: Any,
     device_baseline_mb = (device_baseline_bytes / _BYTES_PER_MB
                           if device_baseline_bytes is not None else None)
 
-    peak_components = [host_peak_mb if not _is_nan(host_peak_mb) else 0.0]
-    if device_peak_mb is not None:
-        peak_components.append(device_peak_mb)
-    peak_ram_mb = max(peak_components) if peak_components else float("nan")
+    if is_cuda and use_torch_allocator and device_peak_mb is not None:
+        # Allocator peak = weights + activations of THIS model. Host RSS is
+        # ~1.8 GB of Python/torch/CUDA context for any model, so taking the
+        # max() with it made the objective constant across candidates.
+        peak_ram_mb = device_peak_mb
+    else:
+        peak_components = [host_peak_mb if not _is_nan(host_peak_mb) else 0.0]
+        if device_peak_mb is not None:
+            peak_components.append(device_peak_mb)
+        peak_ram_mb = max(peak_components)
 
     report: dict[str, Any] = {
         "peak_ram_mb":        round(peak_ram_mb, 4)

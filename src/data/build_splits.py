@@ -105,6 +105,7 @@ import json
 import logging
 import random
 import time
+import zlib
 from collections import OrderedDict
 from pathlib import Path
 from typing import Iterable
@@ -139,6 +140,7 @@ def build_splits(raw_dir: Path,
                  seed: int,
                  stratify_by_defect: bool = True,
                  *,
+                 val_ad_ratio: float = 0.3,
                  write_cross_category: bool = True,
                  **_unused) -> dict:
     """Generate per-category and cross-category split manifests.
@@ -150,6 +152,10 @@ def build_splits(raw_dir: Path,
     if not 0.0 <= val_ratio < 1.0:
         raise ValueError(
             f"val_ratio must lie in [0, 1); got {val_ratio!r}"
+        )
+    if not 0.0 <= val_ad_ratio < 1.0:
+        raise ValueError(
+            f"val_ad_ratio must lie in [0, 1); got {val_ad_ratio!r}"
         )
 
     if not raw_dir.is_dir():
@@ -175,6 +181,7 @@ def build_splits(raw_dir: Path,
             category=category,
             category_root=dataset_root / category,
             val_ratio=val_ratio,
+            val_ad_ratio=val_ad_ratio,
             seed=seed,
             stratify_by_defect=stratify_by_defect,
         )
@@ -184,6 +191,7 @@ def build_splits(raw_dir: Path,
         summary[category] = {
             "train":       manifest["counts"]["train"],
             "val":         manifest["counts"]["val"],
+            "val_ad":      manifest["counts"]["val_ad"],
             "test_good":   manifest["counts"]["test_good"],
             "test_defect": manifest["counts"]["test_defect"],
             "test":        manifest["counts"]["test"],
@@ -221,6 +229,7 @@ def _build_category_manifest(*,
                              category: str,
                              category_root: Path,
                              val_ratio: float,
+                             val_ad_ratio: float,
                              seed: int,
                              stratify_by_defect: bool) -> dict:
     """Construct a deterministic train/val/test manifest for one category."""
@@ -295,9 +304,18 @@ def _build_category_manifest(*,
         n_test_defect_per_type[defect_name] = defect_count
         n_test_defect += defect_count
 
+    # ---- official test → val_ad (model selection) + test (final report) --
+    # ``val`` holds only normal images, so AUROC is undefined on it. Search
+    # and candidate ranking use ``val_ad`` instead; ``test`` stays untouched
+    # until the final report. Stratified by defect type (``good`` included).
+    val_ad_records, test_records = _split_stratified(
+        test_records, val_ad_ratio, random.Random(_combine_seed(seed, category + "/val_ad")),
+    )
+
     counts = {
         "train":           len(train_records),
         "val":             len(val_records),
+        "val_ad":          len(val_ad_records),
         "test":            len(test_records),
         "test_good":       n_test_good,
         "test_defect":     n_test_defect,
@@ -308,11 +326,13 @@ def _build_category_manifest(*,
         "raw_root": str(category_root),
         "seed": seed,
         "val_ratio": val_ratio,
+        "val_ad_ratio": val_ad_ratio,
         "stratify_by_defect": stratify_by_defect,
         "splits": {
-            "train": train_records,
-            "val":   val_records,
-            "test":  test_records,
+            "train":  train_records,
+            "val":    val_records,
+            "val_ad": val_ad_records,
+            "test":   test_records,
         },
         "counts": counts,
     }
@@ -506,7 +526,28 @@ def _rel(path: Path, base: Path) -> str:
 
 def _combine_seed(seed: int, key: str) -> int:
     """Combine the global seed with a per-category key for independent RNGs."""
-    return (seed * 1_000_003 + (hash(key) & 0xFFFFFFFF)) & 0x7FFFFFFF
+    # crc32, not hash(): str hashes are salted per process (PYTHONHASHSEED),
+    # which made splits differ between runs.
+    return (seed * 1_000_003 + zlib.crc32(key.encode("utf-8"))) & 0x7FFFFFFF
+
+
+def _split_stratified(records: list[dict], ratio: float,
+                      rng: random.Random) -> tuple[list[dict], list[dict]]:
+    """Split ``records`` into (picked, rest), taking ``ratio`` of each defect."""
+    groups: dict[str, list[dict]] = OrderedDict()
+    for r in records:
+        groups.setdefault(r["defect"], []).append(r)
+    picked: list[dict] = []
+    rest: list[dict] = []
+    for group in groups.values():
+        group = list(group)
+        rng.shuffle(group)
+        n = int(round(ratio * len(group)))
+        if ratio > 0 and len(group) >= 2:
+            n = min(max(n, 1), len(group) - 1)  # keep both sides non-empty
+        picked.extend(group[:n])
+        rest.extend(group[n:])
+    return picked, rest
 
 
 def _write_json_atomic(path: Path, payload: dict) -> None:

@@ -61,7 +61,7 @@ search_space:
 
 # ── Fitness evaluator (must match src.nas.fitness.FitnessConfig) ─────────
 fitness:
-  eval_split: test
+  eval_split: val_ad   # NEVER 'test': selection on test leaks into reported results
 
   # Quick training during search (small budget; full retrain happens later).
   n_search_epochs:   5
@@ -72,10 +72,14 @@ fitness:
   # Hardware profiling.
   n_profiling_warmup: 10
   n_profiling_iters:  30
-  # Energy backend: "auto" | "tegrastats" | "sysfs" | "nvml" | "noop".
-  #   PC with NVIDIA GPU -> nvml  (pip install pynvml)
+  # Energy backend: "auto" | "tegrastats" | "sysfs" | "nvml" | "none".
+  #   PC with NVIDIA GPU -> nvml  (pip install pynvml) — ONLY if the GPU
+  #                         reports power. The RTX 3050 of this PC does NOT
+  #                         (NVML "Not Supported"), hence "none" here.
   #   Jetson             -> auto  (tegrastats / sysfs)
-  energy_backend: nvml
+  #   none               -> energy objective disabled (3-objective search);
+  #                         energy is measured later on-device (main_deploy).
+  energy_backend: none
 
   # Hard constraints.
   max_params_m: 20.0
