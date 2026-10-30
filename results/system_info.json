@@ -1,6 +1,6 @@
 {
   "clocks": {},
-  "collected_at": "2026-05-12T01:32:07+00:00",
+  "collected_at": "2026-10-30T00:45:07+00:00",
   "cpu": {
     "base_freq_mhz": 0.0,
     "cache": {},
@@ -22,11 +22,18 @@
   "gpu": [
     {
       "compute_capability": "8.6",
+      "driver_version": "581.80",
+      "gpu_util_pct": 3,
       "index": 0,
-      "multi_processors": 20,
+      "mem_clock_mhz": 405,
+      "mem_util_pct": 11,
       "name": "NVIDIA GeForce RTX 3050",
-      "source": "torch.cuda",
-      "vram_total_mb": 8191.5
+      "sm_clock_mhz": 210,
+      "temperature_c": 39,
+      "uuid": "GPU-d5720d09-341e-b0ef-cbe2-42d50db44ca0",
+      "vram_free_mb": 7176.1,
+      "vram_total_mb": 8192.0,
+      "vram_used_mb": 1015.9
     }
   ],
   "jetpack": {
@@ -60,13 +67,13 @@
     "version": "2.6.0+cu124"
   },
   "ram": {
-    "available_mb": 19601.32,
-    "percent": 40.0,
-    "swap_percent": 0.7,
+    "available_mb": 22332.18,
+    "percent": 31.6,
+    "swap_percent": 0.0,
     "swap_total_mb": 8192.0,
-    "swap_used_mb": 55.4,
+    "swap_used_mb": 0.0,
     "total_mb": 32657.0,
-    "used_mb": 13055.68
+    "used_mb": 10324.81
   },
   "thermals": {}
 }

@@ -1,0 +1,149 @@
+HANDOFF PARA CLAUDE — Proyecto MvTec AD (caso de estudio 1 de tesis doctoral)
+Fecha: 2026-10-29  |  Rama: metodologia-doctoral  |  Último commit: dfc8d1a
+==========================================================================
+
+INSTRUCCIÓN PARA CLAUDE: lee este archivo completo, luego Objetivos.txt (en la
+raíz del proyecto), README.md y config/hierarchical.yaml. Después ejecuta
+`python test_hierarchical.py` para verificar el entorno antes de tocar nada.
+Responde en español. El usuario prefiere: analizar primero, proponer, y
+esperar su OK antes de cambios grandes.
+
+--------------------------------------------------------------------------
+0. ANTES DE EMPEZAR EN EL OTRO PC
+--------------------------------------------------------------------------
+- El trabajo está en la rama `metodologia-doctoral` de GitHub (NO en main):
+    git clone https://github.com/MichaelCifuentesMolano/Proyecto-MvTec-AD-Moveo.git
+    cd Proyecto-MvTec-AD-Moveo && git checkout metodologia-doctoral
+- Objetivos.txt NO está en GitHub (el repo es público): copiarlo a mano a la
+  raíz del proyecto.
+- data/ está en .gitignore: en el otro PC hay que tener
+  mvtec_anomaly_detection.tar.xz y correr
+  `python main_prepare.py --archive mvtec_anomaly_detection.tar.xz`
+  (genera splits train/val/val_ad/test; son deterministas con crc32, así que
+  saldrán idénticos a los del PC original con la misma semilla 42).
+- Entorno usado: Python 3.13 + torch 2.6 (CUDA 12.4). En el PC original el
+  python del PATH (3.12) NO tenía torch; verificar cuál intérprete tiene torch.
+  En el PC original pandas estaba roto y faltaban onnx/onnxruntime/sklearn:
+  `pip install -r requirements.txt`.
+- Energía: la RTX 3050 del PC original no reporta potencia por NVML. Si el
+  otro PC tiene una GPU de escritorio, probar:
+  python -c "import pynvml as n;n.nvmlInit();print(n.nvmlDeviceGetPowerUsage(n.nvmlDeviceGetHandleByIndex(0)))"
+  Si funciona, se puede poner energy_backend: nvml en config/hierarchical.yaml
+  y añadir energy_mj a los objetivos de level1. Si no, dejar "none".
+
+--------------------------------------------------------------------------
+1. CONTEXTO DOCTORAL (resumen de Objetivos.txt)
+--------------------------------------------------------------------------
+Tesis: metodología reproducible + optimización multiobjetivo JERÁRQUICA de
+arquitectura y cuantización de redes (políticas de RL) para robots embebidos,
+con métricas verificables en hardware (Jetson Orin Nano, único hardware
+disponible). Objetivos: (1) testbed/benchmark reproducible con fidelidad
+Sim-to-Real; (2) esquema jerárquico arq + representación numérica +
+cuantización, con análisis de convergencia, robustez y sensibilidad al error
+de cuantización; (3) validar en >=2 tareas robóticas (locomoción,
+manipulación, seguimiento perceptual).
+Decisión tomada con el usuario: MVTec AD es el CASO DE ESTUDIO 1 (percepción)
+que valida el núcleo de optimización; las tareas de RL se conectarán después
+al mismo núcleo mediante la interfaz Task (src/tasks/).
+
+--------------------------------------------------------------------------
+2. LO QUE YA SE HIZO (2 commits en metodologia-doctoral)
+--------------------------------------------------------------------------
+Commit 55dc6df (fase 0):
+- Split val_ad = 30% estratificado del test oficial; búsqueda y ranking usan
+  val_ad, test solo para el reporte final (antes la búsqueda seleccionaba en
+  test = fuga de datos).
+- _combine_seed usa crc32 (hash() de Python cambia por proceso: los splits
+  no eran reproducibles).
+- peak_ram_mb = pico del allocator CUDA (antes = RSS del proceso, ~1.8 GB
+  constante para todos los modelos).
+- Energía: fail-fast si el backend no mide; modo explícito "none".
+
+Commit dfc8d1a (fases 1 y 2):
+- BUGS GRAVES corregidos que INVALIDAN los resultados de mayo 2026
+  (results/search, results/retrain, checkpoints/final_models y las cifras
+  del paper1_draft.tex):
+  a) build_model ignoraba "arch_spec": los 960 candidatos de la búsqueda
+     eran el mismo autoencoder por defecto.
+  b) la cuantización del genoma nunca se aplicaba (siempre W8A8) y
+     retrain/deploy leían la clave "quantization" (inexistente) -> los
+     modelos "QAT" reentrenados eran FP32.
+  c) main_deploy usaba input_shape fijo 224 para todos los candidatos.
+- Nuevo núcleo:
+  src/nas/space.py          espacio discreto genérico; Nivel 1 (arquitectura),
+                            Nivel 2 (representación int/pot/fp16, ternario 2b,
+                            bits por segmento), espacio plano (ablación).
+  src/nas/nsga2_engine.py   NSGA-II agnóstico de tarea, objetivos por nombre,
+                            caché de evaluaciones, población inicial sembrable.
+  src/nas/fitness.py        evaluador genérico (construir -> cuantizar ->
+                            MACs/BOPs/memoria -> entrenar -> evaluar -> perfilar).
+  src/tasks/mvtec.py        interfaz Task (build/input_shape/train/calibrate/evaluate).
+  src/profiling/complexity.py  MACs, BOPs, weight_kb deterministas.
+  src/quantization/qat_wrapper.py  esquema de búsqueda por segmentos,
+                            potencias de dos (pot), ternario absmean, fp16.
+  main_hierarchical.py      N1 -> sensibilidad por segmento -> N2 (sembrado por
+                            sensibilidad) -> frente final + flag deployable ->
+                            best_candidates.json. Modos: hierarchical|flat|random.
+  test_hierarchical.py      7 chequeos de regresión (todos pasan).
+- Eliminados: main_search.py, src/nas/search_space.py, src/nas/encoding.py,
+  config/search.yaml, scratch_eval.py (genoma incompatible con la fábrica).
+- Familias feature_recon y student_teacher EXCLUIDAS: necesitan un teacher
+  preentrenado que el train_loop no provee (AUROC indefinido).
+- Smoke test de los 3 modos + main_retrain (1 época) verificado: OK.
+
+--------------------------------------------------------------------------
+3. PRÓXIMOS PASOS (en orden)
+--------------------------------------------------------------------------
+[ ] 1. Verificar entorno: `python test_hierarchical.py` (7 "ok").
+[ ] 2. Piloto jerárquico (~4-5 h en RTX 3050; menos en una GPU mejor):
+       python main_hierarchical.py --config config/hierarchical.yaml
+       Revisar results/hierarchical/bottle/hierarchical_seed42/:
+       - l1/history.csv: el hipervolumen debe crecer; el frente NO debe ser
+         el 100% de la población.
+       - l2_*/sensitivity.json: caídas de AUROC por segmento distintas entre sí.
+       - final_front.csv: hay soluciones deployable=True.
+       Si la GPU del otro PC es más potente, subir presupuestos en
+       config/hierarchical.yaml (level1 pop 24-32, gens 15-20).
+[ ] 3. Líneas base para el análisis de convergencia (objetivo 2):
+       --mode flat y --mode random con semillas 42, 1, 2 (y hierarchical con
+       las mismas semillas). Igualar presupuesto: comparar con total_evaluations
+       y total_seconds de run_summary.json.
+[ ] 4. Reentrenar el frente: main_retrain.py (config/retrain.yaml ya apunta a
+       results/hierarchical/bottle/hierarchical_seed42). Test se evalúa una vez.
+[ ] 5. FASE 3 (testbed, objetivo 1) — pendiente de diseñar con el usuario:
+       - Adaptar main_report.py a results/hierarchical (hoy lee results/search).
+       - Script de comparación de modos/semillas: hipervolumen final con
+         normalización común, curvas HV vs evaluaciones, test estadístico.
+       - Servidor/script de medición en Jetson Orin Nano (main_deploy.py:
+         latencia p50/p95/p99, energía tegrastats, RAM) y métrica de FIDELIDAD
+         PC->Jetson: correlación de rangos (Spearman/Kendall) entre BOPs/latencia
+         del PC y latencia/energía reales; caída de AUROC fake-quant vs TensorRT.
+         Verificar versión JetPack con `cat /etc/nv_tegra_release`.
+       - Métricas de estabilidad operativa: jitter de latencia, throttling
+         térmico, deriva en ejecuciones largas.
+       - Opcional: reanudación de corridas largas (hoy no hay checkpoint;
+         evaluations.csv se escribe por generación).
+[ ] 6. Más categorías: --category carpet (textura) y --category screw (difícil).
+[ ] 7. Baselines de la literatura para el paper: PatchCore/PaDiM con backbone
+       pequeño (AUROC de referencia ~0.98-1.0 en bottle).
+[ ] 8. Paper (paper1_draft.tex): reescribir secciones de búsqueda, QAT y
+       resultados (las cifras actuales son de la búsqueda inválida); la línea
+       ~611 decía que el AUROC se medía en validación (era test); describir el
+       protocolo val_ad/test, la jerarquía, BOPs, y que TensorRT solo ejecuta
+       fp16/INT8 simétrico (las variantes 2/4/6 bits y pot son simuladas).
+       Unificar bibliografía (hay \bibliography{references} y thebibliography,
+       y un \cite{TODO_nasiam}).
+[ ] 9. Más adelante (objetivo 3): tareas de RL (locomoción / manipulación)
+       como nuevas clases en src/tasks/ con la misma interfaz; evaluate() =
+       retorno medio del episodio. Probablemente en un repo aparte que use este
+       núcleo.
+
+--------------------------------------------------------------------------
+4. LIMPIEZA YA HECHA (2026-10-29)
+--------------------------------------------------------------------------
+- Borrados (inválidos): results/search, results/search_pilot_2026-05,
+  results/retrain, checkpoints/final_models, data/splits_old_2026-05.
+- results/dataset_summary.json regenerado con main_prepare (incluye val_ad).
+- Se conservan: mvtec_anomaly_detection.tar.xz (5,2 GB, duplica data/raw;
+  borrable si se necesita espacio), Pipeline_Analysis_Report.docx y la
+  carpeta de bibliografía (ambos fuera de git).

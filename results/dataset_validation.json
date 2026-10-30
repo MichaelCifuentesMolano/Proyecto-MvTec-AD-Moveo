@@ -16,7 +16,7 @@
     "wood",
     "zipper"
   ],
-  "elapsed_seconds": 42.966,
+  "elapsed_seconds": 40.566,
   "expected_categories": [
     "bottle",
     "cable",
@@ -445,7 +445,7 @@
     }
   },
   "raw_dir": "C:\\Users\\Maicol\\Desktop\\Proyecto MvTec AD\\data\\raw\\mvtec_ad",
-  "timestamp": "2026-05-12T01:32:51.474890+00:00",
+  "timestamp": "2026-10-30T00:46:03.010657+00:00",
   "unexpected_categories": [],
   "valid": true
 }
