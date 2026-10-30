@@ -308,7 +308,7 @@ def to_latex(
         Ordered column identifiers (for COLUMN_DEFS lookup).  Required when
         ``data`` is a list of dicts; ignored for 2-D list input.
     caption, label:
-        LaTeX ``\caption{}`` and ``\label{tab:...}``.
+        LaTeX caption text and label key (e.g. ``tab:...``).
     cfg:
         Formatting configuration.
     footer_rows:

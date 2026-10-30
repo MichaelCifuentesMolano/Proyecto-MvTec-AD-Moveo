@@ -43,7 +43,25 @@ Public interface (consumed by ``main_search.py`` / ``main_retrain.py``)
 
 Configuration schema
 --------------------
-::
+Two schemas are accepted. The *search* schema is what the NSGA-II genome
+produces (``src.nas.space``); it is translated into per-layer configs by
+splitting the ordered list of quantizable layers into ``len(weight_bits)``
+contiguous segments — generic for CNNs and MLP policies alike::
+
+    quant_spec = {
+        "representation": "int" | "pot" | "fp16",
+        "weight_bits":    [8, 4, 2],     # one entry per segment (2 = ternary)
+        "act_bits":       [8, 8, 6],
+        "symmetric":      True,
+        "per_channel":    False,
+    }
+
+``"fp16"`` leaves the model untouched (half precision happens at export).
+``"pot"`` quantizes weights to signed powers of two (shift-only multiplies);
+activations stay uniform. Two-bit symmetric weights are ternary
+``{-1, 0, +1}`` with an abs-mean scale (BitNet b1.58).
+
+The explicit *layer* schema::
 
     qconfig = {
         "enabled":           True,
@@ -122,6 +140,7 @@ class TensorQuantConfig:
     observer: str = "ema"            # 'minmax' | 'ema'
     ema_momentum: float = 0.01
     enabled: bool = True
+    scheme: str = "uniform"          # 'uniform' | 'pot' (power-of-two)
 
     @classmethod
     def from_dict(cls, data: dict[str, Any] | None,
@@ -136,6 +155,7 @@ class TensorQuantConfig:
             observer=str(data.get("observer", "ema")),
             ema_momentum=float(data.get("ema_momentum", 0.01)),
             enabled=bool(data.get("enabled", True)),
+            scheme=str(data.get("scheme", "uniform")),
         )
         if cfg.bits < 2:
             raise ValueError(f"bits must be >= 2 (got {cfg.bits}); "
@@ -144,6 +164,8 @@ class TensorQuantConfig:
             cfg.enabled = False
         if cfg.observer not in {"minmax", "ema"}:
             raise ValueError(f"unknown observer: {cfg.observer!r}")
+        if cfg.scheme not in {"uniform", "pot"}:
+            raise ValueError(f"unknown scheme: {cfg.scheme!r}")
         return cfg
 
     def qrange(self) -> tuple[int, int]:
@@ -178,6 +200,27 @@ class _FakeQuantSTE(torch.autograd.Function):
         # gradient could be masked here, but the standard QAT recipe
         # passes everything for stability.
         return grad_output, None, None, None, None
+
+
+class _PotQuantSTE(torch.autograd.Function):
+    """Round |x| to the nearest power of two below ``scale`` (identity grad).
+
+    ``bits`` gives 1 sign bit + ``2**(bits-1) - 1`` magnitudes
+    ``scale * 2**-k`` (k = 0..n-1); smaller magnitudes snap to zero.
+    """
+
+    @staticmethod
+    def forward(ctx, x: torch.Tensor, scale: torch.Tensor,
+                bits: int) -> torch.Tensor:
+        n = (1 << (bits - 1)) - 1
+        mag = (x.abs() / scale).clamp(min=1e-30)
+        k = torch.round(-torch.log2(mag)).clamp(min=0)
+        q = torch.where(k <= n - 1, torch.exp2(-k), torch.zeros_like(mag))
+        return torch.sign(x) * q * scale
+
+    @staticmethod
+    def backward(ctx, grad_output: torch.Tensor):  # noqa: D401
+        return grad_output, None, None
 
 
 class FakeQuantize(nn.Module):
@@ -252,9 +295,24 @@ class FakeQuantize(nn.Module):
         if self.observe_only:
             return x
 
-        qmin, qmax = self.cfg.qrange()
         scale, zp = self._broadcast(x)
+        if self.cfg.scheme == "pot":
+            return _PotQuantSTE.apply(x, self._pot_scale(x), self.cfg.bits)
+        qmin, qmax = self.cfg.qrange()
+        if self.cfg.bits == 2 and self.cfg.symmetric:
+            # Ternary: max-based scale would zero almost every weight; use the
+            # abs-mean scale of BitNet b1.58 instead.
+            scale = x.detach().abs().mean().clamp(min=1e-8)
+            zp = torch.zeros_like(scale)
         return _FakeQuantSTE.apply(x, scale, zp, qmin, qmax)
+
+    def _pot_scale(self, x: torch.Tensor) -> torch.Tensor:
+        """Largest representable magnitude = observed |max| (per tensor/ch)."""
+        r = torch.maximum(self.running_max.abs(), self.running_min.abs())
+        r = r.clamp(min=1e-8)
+        if self.cfg.per_channel and self.num_channels > 1:
+            return r.view([self.num_channels] + [1] * (x.dim() - 1))
+        return r
 
     # ------------------------------------------------------------------
     def _broadcast(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
@@ -391,6 +449,8 @@ def wrap_for_qat(model: nn.Module, qconfig: dict | None,
     if not qconfig or not qconfig.get("enabled", True):
         LOG.debug("Quantization disabled — returning model unchanged.")
         return model
+    if "representation" in qconfig or "weight_bits" in qconfig:
+        return _wrap_from_search_spec(model, qconfig)
 
     weight_defaults = qconfig.get("weight", {}) or {}
     act_defaults = qconfig.get("activation", {}) or {}
@@ -439,6 +499,43 @@ def wrap_for_qat(model: nn.Module, qconfig: dict | None,
                   name, type(mod).__name__,
                   w_cfg.bits, w_cfg.symmetric, w_cfg.per_channel,
                   a_cfg.bits, a_cfg.symmetric)
+    return model
+
+
+def _quantizable_layers(model: nn.Module) -> list[tuple[str, nn.Module]]:
+    """Conv2d / Linear layers in graph order (the unit of segmentation)."""
+    return [(n, m) for n, m in model.named_modules()
+            if isinstance(m, (nn.Conv2d, nn.Linear))]
+
+
+def segment_of(i: int, n_layers: int, n_segments: int) -> int:
+    """Segment index of layer ``i`` when ``n_layers`` split into contiguous parts."""
+    return i * n_segments // n_layers
+
+
+def _wrap_from_search_spec(model: nn.Module, spec: dict) -> nn.Module:
+    """Apply a genome ``quant_spec`` (see module docstring) in place."""
+    rep = spec.get("representation", "int")
+    if rep == "fp16":
+        return model
+    w_bits = [int(b) for b in spec["weight_bits"]]
+    a_bits = [int(b) for b in spec["act_bits"]]
+    if len(w_bits) != len(a_bits):
+        raise ValueError("weight_bits and act_bits need one entry per segment")
+    sym = bool(spec.get("symmetric", True))
+    per_ch = bool(spec.get("per_channel", False))
+    layers = _quantizable_layers(model)
+    for i, (name, mod) in enumerate(layers):
+        s = segment_of(i, len(layers), len(w_bits))
+        w_cfg = TensorQuantConfig(bits=w_bits[s], symmetric=sym or w_bits[s] == 2,
+                                  per_channel=per_ch, observer="minmax",
+                                  scheme="pot" if rep == "pot" else "uniform")
+        a_cfg = TensorQuantConfig(bits=a_bits[s], symmetric=sym,
+                                  per_channel=False, observer="ema")
+        cls = QConv2d if isinstance(mod, nn.Conv2d) else QLinear
+        _set_submodule(model, name, cls.from_float(mod, w_cfg, a_cfg))
+    LOG.info("Quantized %d layer(s) in %d segment(s): rep=%s W=%s A=%s",
+             len(layers), len(w_bits), rep, w_bits, a_bits)
     return model
 
 

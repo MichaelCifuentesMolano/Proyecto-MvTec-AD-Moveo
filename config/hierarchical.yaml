@@ -1,0 +1,85 @@
+# config/hierarchical.yaml
+# ========================
+# Hierarchical multi-objective search (main_hierarchical.py).
+# Same task / evaluator for every mode, so hierarchical vs flat vs random are
+# directly comparable (run several seeds of each: --mode ... --seed ...).
+#
+# Rough cost on the RTX 3050: ~1 min per 5-epoch evaluation, ~0.3 min per
+# 2-epoch Level-2 fine-tune. The budgets below are a PILOT (~4-5 h total).
+
+mode: hierarchical          # hierarchical | flat | random
+seed: 42
+results_dir: results/hierarchical
+device: cuda
+
+# NVML on this PC's RTX 3050 reports "Not Supported" -> no energy on the PC.
+# Energy is measured on the Jetson (tegrastats) for the Level-3 candidates.
+energy_backend: none        # none | nvml | auto | tegrastats | sysfs
+max_params_m: 20.0
+
+task:
+  name: mvtec
+  splits_dir: data/splits
+  category: bottle
+  eval_split: val_ad        # NEVER 'test' (the task refuses it)
+  batch_size: 8
+  lr: 1.0e-3
+
+# ---- Level 1: architecture (ArchSpec fields of src/models/model_factory) ----
+# feature_recon / student_teacher are excluded: they need a pretrained teacher
+# that the training loop does not provide (AUROC undefined without it).
+arch_choices:
+  family:         [autoencoder, unet, patch_cnn]
+  input_size:     [128, 192, 224, 256]
+  depth:          [2, 3, 4, 5]
+  base_width:     [8, 16, 24, 32]
+  width_mult:     [1.0, 1.5, 2.0]
+  kernel_size:    [3, 5, 7]
+  layer_type:     [conv, ds, ir]
+  expansion:      [2, 4, 6]
+  bottleneck_dim: [32, 64, 128, 256]
+  use_skip:       [true, false]
+
+# ---- Level 2: numeric representation + quantization -------------------------
+#   int  = uniform integer;  pot = power-of-two weights (shift-only multiply)
+#   fp16 = half precision;   weight bits 2 = ternary {-1,0,+1} (BitNet b1.58)
+# Bits are chosen per *segment*: the ordered list of Conv/Linear layers split
+# into max_segments contiguous parts (generic for CNNs and MLP policies).
+quant_choices:
+  representations: [int, pot, fp16]
+  symmetric:       [true, false]
+  per_channel:     [true, false]
+  weight_bits:     [2, 4, 6, 8]
+  act_bits:        [4, 6, 8]
+max_segments: 4
+
+level1:
+  population_size: 16
+  n_generations:   8
+  n_epochs:        5
+  objectives:      [performance, macs_m, latency_ms, peak_ram_mb]
+  maximize:        [performance]
+  top_k:           3          # architectures passed to Level 2
+
+level2:
+  population_size: 12
+  n_generations:   6
+  n_epochs:        2          # QAT fine-tune from the Level-1 weights
+  objectives:      [performance, bops_g, weight_kb]
+  maximize:        [performance]
+
+# Ablation baselines: final objectives = Level 2's, so fronts are comparable.
+flat:
+  population_size: 16
+  n_generations:   12
+  n_epochs:        5
+  objectives:      [performance, bops_g, weight_kb]
+  maximize:        [performance]
+
+random:
+  n_evaluations:   200
+  n_epochs:        5
+  objectives:      [performance, bops_g, weight_kb]
+  maximize:        [performance]
+
+final_top_k: 4               # candidates handed to retrain / Jetson (Level 3)

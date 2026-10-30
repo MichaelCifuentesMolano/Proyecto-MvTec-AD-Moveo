@@ -6,7 +6,7 @@
 # This file did not exist before: all previous runs used built-in defaults.
 
 # --- I/O -------------------------------------------------------------------
-search_results_dir: "results/search"
+search_results_dir: "results/hierarchical/bottle/hierarchical_seed42"   # main_hierarchical.py output
 results_dir: "results/retrain"
 checkpoints_dir: "checkpoints/final_models"
 splits_dir: "data/splits"

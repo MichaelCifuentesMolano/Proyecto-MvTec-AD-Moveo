@@ -5,7 +5,7 @@ main_retrain.py
 Entry-point orchestration script for the *full-budget retraining* stage of
 the quantized-NN / MVTec-AD pipeline.
 
-The NSGA-II search (``main_search.py``) uses a low-fidelity training budget
+The NSGA-II search (``main_hierarchical.py``) uses a low-fidelity training budget
 to keep the multi-objective sweep tractable. Once the search produces a
 Pareto front, the most promising candidates must be retrained with the full
 training budget to obtain definitive AUROC / metric values and a
@@ -74,7 +74,7 @@ Expected module interfaces (downstream contract)
 
 Assumptions
 -----------
-- ``main_prepare.py`` and ``main_search.py`` have been executed; the search
+- ``main_prepare.py`` and ``main_hierarchical.py`` have been executed; the search
   results live under ``results/search/`` and split manifests under
   ``data/splits/``.
 - Each search candidate carries (at minimum) keys ``"candidate"`` containing
@@ -281,7 +281,7 @@ def _load_candidates(cfg: RetrainConfig,
         if not path.is_file():
             raise FileNotFoundError(
                 f"best_candidates.json not found at {path}. "
-                "Run main_search.py first or pass --candidates-source pareto."
+                "Run main_hierarchical.py first (or pass --search-results-dir)."
             )
         payload = json.loads(path.read_text(encoding="utf-8"))
         items: Iterable[dict[str, Any]] = payload.get("candidates", [])
@@ -343,7 +343,7 @@ def _candidate_id_from(item: dict[str, Any], source: Path) -> str:
 
 
 def _load_pareto_csv(path: Path) -> list[dict[str, Any]]:
-    """Parse ``pareto_front.csv`` produced by main_search.py."""
+    """Parse ``pareto_front.csv`` produced by main_hierarchical.py."""
     out: list[dict[str, Any]] = []
     with path.open("r", encoding="utf-8") as fh:
         reader = csv.DictReader(fh)
@@ -461,7 +461,7 @@ class RetrainPipeline:
         """Retrain a single candidate end-to-end and return its result row."""
         cid = candidate["candidate_id"]
         config = candidate["config"]
-        qconfig = (config.get("quantization", {})
+        qconfig = (config.get("quant_spec") or config.get("quantization", {})
                    if isinstance(config, dict) else {})
         ckpt_path = self._checkpoint_path(cid)
 
@@ -731,7 +731,7 @@ class RetrainPipeline:
 # ---------------------------------------------------------------------------
 def _build_argparser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
-        description=("Retrain Pareto-optimal candidates from main_search.py "
+        description=("Retrain Pareto-optimal candidates from main_hierarchical.py "
                      "with the full training budget."),
     )
     p.add_argument("--config", type=Path, default=DEFAULT_CONFIG)

@@ -3,7 +3,7 @@ src/models/model_factory.py
 ===========================
 
 Architecture factory for the NSGA-II search. Builds a PyTorch ``nn.Module``
-from a genome / candidate configuration produced by ``src.nas.encoding``.
+from a candidate configuration produced by ``src.nas.space``.
 
 Supported architecture families
 -------------------------------
@@ -15,13 +15,13 @@ Supported architecture families
                             features (teacher is loaded externally).
 - ``"patch_cnn"``         – Fully-convolutional patch-level anomaly scorer.
 
-Public interface (consumed by ``main_search.py`` / ``main_retrain.py``)
+Public interface (consumed by ``src.tasks`` / ``main_retrain.py``)
 ----------------------------------------------------------------------
 ``build_model(candidate: dict) -> torch.nn.Module``
 
 The ``candidate`` may be either the architecture sub-dict directly or the
-full genome dict containing an ``"architecture"`` key (and an optional
-``"quantization"`` key — ignored here). Sensible defaults fill any
+full candidate dict containing an ``"arch_spec"`` (or legacy
+``"architecture"``) key; ``"quant_spec"`` is ignored here. Sensible defaults fill any
 missing fields so partial genomes still build.
 
 Forward output convention
@@ -120,8 +120,12 @@ class ArchSpec:
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "ArchSpec":
         """Build an ``ArchSpec`` from a genome dict, accepting partial fields."""
-        if "architecture" in data and isinstance(data["architecture"], dict):
-            data = data["architecture"]
+        # Candidates from the search carry the spec under "arch_spec"; without
+        # this every candidate silently built the default autoencoder.
+        for key in ("arch_spec", "architecture"):
+            if isinstance(data.get(key), dict):
+                data = data[key]
+                break
         known = {f for f in cls.__dataclass_fields__}
         kwargs = {k: v for k, v in data.items() if k in known}
         extra = {k: v for k, v in data.items() if k not in known}

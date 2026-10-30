@@ -490,7 +490,7 @@ class DeployPipeline:
     def _load_trained_model(self, candidate: dict[str, Any]) -> torch.nn.Module:
         """Rebuild architecture, apply QAT wrapper, and load the checkpoint."""
         config = candidate["config"]
-        qconfig = (config.get("quantization", {})
+        qconfig = (config.get("quant_spec") or config.get("quantization", {})
                    if isinstance(config, dict) else {})
         model = build_model(config)
         model = wrap_for_qat(model, qconfig)
@@ -520,7 +520,7 @@ class DeployPipeline:
         result = export_to_onnx(
             model=model,
             output_path=onnx_path,
-            input_shape=self.cfg.input_shape,
+            input_shape=self._cur_shape,
             opset=self.cfg.onnx_opset,
             convert_qat=True,
             dynamic_axes={"input": {0: "batch"}, "output": {0: "batch"}},
@@ -530,18 +530,27 @@ class DeployPipeline:
         return result
 
     # ------------------------------------------------------------------
+    def _shape(self, candidate: dict[str, Any]) -> tuple[int, ...]:
+        """Input shape of this candidate (its own input_size, config batch)."""
+        arch = (candidate.get("config") or {}).get("arch_spec") or {}
+        if "input_size" not in arch:
+            return tuple(self.cfg.input_shape)
+        s = int(arch["input_size"])
+        return (int(self.cfg.input_shape[0]), 3, s, s)
+
     def _get_calibration_data(self) -> list[torch.Tensor]:
-        """Lazily build (and cache in-memory) the INT8 calibration batches."""
-        if not hasattr(self, "_calib_cache"):
-            self._calib_cache = _load_calibration_batches(
+        """Lazily build (and cache in-memory, per shape) the INT8 calibration batches."""
+        self._calib_cache = getattr(self, "_calib_cache", {})
+        if self._cur_shape not in self._calib_cache:
+            self._calib_cache[self._cur_shape] = _load_calibration_batches(
                 splits_dir=self.cfg.splits_dir,
                 category=self.cfg.category,
-                input_shape=self.cfg.input_shape,
+                input_shape=self._cur_shape,
                 n_images=self.cfg.calibration_images,
                 batch_size=self.cfg.calibration_batch_size,
                 logger=self.log,
             )
-        return self._calib_cache
+        return self._calib_cache[self._cur_shape]
 
     def _build_engine_for(self,
                           candidate_id: str,
@@ -567,9 +576,9 @@ class DeployPipeline:
         trt_cfg = TRTBuildConfig(
             precision=precision,                       # type: ignore[arg-type]
             workspace_mb=self.cfg.workspace_mb,
-            min_batch=int(self.cfg.input_shape[0]),
-            opt_batch=int(self.cfg.input_shape[0]),
-            max_batch=int(self.cfg.input_shape[0]),
+            min_batch=int(self._cur_shape[0]),
+            opt_batch=int(self._cur_shape[0]),
+            max_batch=int(self._cur_shape[0]),
             calibration_cache=calib_cache if precision == "int8" else None,
         )
         result = build_engine(
@@ -613,7 +622,7 @@ class DeployPipeline:
         """
         engine = load_engine(engine_path)
         ctx = engine.create_execution_context()
-        dummy = torch.randn(*self.cfg.input_shape, device="cuda")
+        dummy = torch.randn(*self._cur_shape, device="cuda")
 
         def _trt_runner(**_kw):
             def _run():
@@ -622,7 +631,7 @@ class DeployPipeline:
 
         raw = benchmark_engine(
             engine,
-            self.cfg.input_shape,
+            self._cur_shape,
             n_warmup=self.cfg.n_warmup,
             n_runs=self.cfg.n_iters,
         )
@@ -643,7 +652,7 @@ class DeployPipeline:
             engine,
             n_iters=self.cfg.n_iters,
             device=self.cfg.device,
-            input_shape=self.cfg.input_shape,
+            input_shape=self._cur_shape,
             runner_factory=_trt_runner,
         )
         # The meter reports per-inference energy directly (idle-corrected
@@ -656,7 +665,7 @@ class DeployPipeline:
         ram = measure_peak_ram(
             engine,
             device=self.cfg.device,
-            input_shape=self.cfg.input_shape,
+            input_shape=self._cur_shape,
             runner_factory=_trt_runner,
         )
         return {"bench": bench, "energy": energy, "ram": ram}
@@ -666,6 +675,7 @@ class DeployPipeline:
                            candidate: dict[str, Any]) -> list[dict[str, Any]]:
         """Export ONNX once, then build + benchmark one engine per precision."""
         cid = candidate["candidate_id"]
+        self._cur_shape = self._shape(candidate)
         retrain = candidate.get("retrain", {})
 
         # 1. ONNX export (shared across precisions).
@@ -689,7 +699,7 @@ class DeployPipeline:
                 "precision": precision,
                 "status": "pending",
                 "onnx_path": str(onnx_path),
-                "input_shape": list(self.cfg.input_shape),
+                "input_shape": list(self._cur_shape),
                 "candidate_config": candidate.get("config", {}),
                 "retrain_test_auroc": retrain.get("test_auroc"),
                 "retrain_val_auroc":  retrain.get("val_auroc"),
@@ -787,7 +797,7 @@ class DeployPipeline:
             "precision": precision,
             "status": f"failed_{stage}",
             "candidate_config": candidate.get("config", {}),
-            "input_shape": list(self.cfg.input_shape),
+            "input_shape": list(self._shape(candidate)),
             "retrain_test_auroc":
                 candidate.get("retrain", {}).get("test_auroc"),
             "retrain_val_auroc":
@@ -887,7 +897,7 @@ class DeployPipeline:
                         "status": "failed_unhandled",
                         "error": traceback.format_exc(limit=3),
                         "candidate_config": cand.get("config", {}),
-                        "input_shape": list(self.cfg.input_shape),
+                        "input_shape": list(self._shape(cand)),
                     }]
 
                 for r in rows:
